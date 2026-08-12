@@ -610,6 +610,7 @@ main {
 /* ---------- chat ---------- */
 .chat { display: flex; flex-direction: column; gap: 12px; }
 .chat-loading { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+.chat-gap { align-self: center; color: var(--muted); font: 11px var(--mono); padding: 2px 0; opacity: 0.85; }
 .msg { max-width: 82%; min-width: 0; }
 .msg.user { align-self: flex-end; }
 .msg.assistant { align-self: flex-start; }
@@ -622,6 +623,72 @@ main {
   border-bottom-right-radius: 4px;
 }
 .msg.assistant .msg-text { background: var(--surface-2); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+
+/* model thinking (collapsible) */
+.think { margin: 0 0 7px; }
+.think summary {
+  cursor: pointer;
+  list-style: none;
+  font: 11px var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+.think summary::-webkit-details-marker { display: none; }
+.think summary::before { content: "▸ 💭 "; }
+.think[open] summary::before { content: "▾ 💭 "; }
+.think-body {
+  margin-top: 6px;
+  padding-left: 11px;
+  border-left: 2px solid var(--hairline);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-style: italic;
+}
+.think-body code { font-style: normal; }
+
+/* inline tool call in the conversation */
+.tool-call {
+  align-self: flex-start;
+  max-width: 92%;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 4px 11px;
+  margin: -2px 0;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  font: 12px var(--mono);
+  color: var(--ink-2);
+  min-width: 0;
+}
+.tool-call-name { color: var(--accent); font-weight: 650; flex-shrink: 0; }
+.tool-call-name::before { content: "⚙ "; }
+.tool-call-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+
+/* live activity indicator (busy agents) */
+.card-activity {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 12.5px var(--mono);
+  color: var(--good);
+}
+.card-activity.big { margin-top: 0; font-size: 13.5px; }
+.spin-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--good);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent);
+  animation: spin-pulse 1.3s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes spin-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 55%, transparent); }
+  70%  { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
 
 /* ---------- markdown ---------- */
 .md { white-space: normal; }

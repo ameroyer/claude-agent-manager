@@ -177,7 +177,34 @@
 - [x] Server was also STALE (old process) — restarted. Newer Claude Code cycle: manual→accept edits→plan→auto
 - [x] Verified: all 8 live agents' modes match their terminals; convergence to every mode in 1-2 presses via server pane_mode
 
-## Working notes
+## Iteration 23 (2026-08-12): model-aware window + model thinking
+- [x] Confirmed the window is NOT stored anywhere readable (transcript = only model id; stats-cache.contextWindow = 0). It's computed in the live CLI. So it stays derived.
+- [x] Model-aware window: MODEL_WINDOWS table keyed on the transcript's model id × beta_1m_enabled(); usage>200k still forces 1M. Fixes e.g. haiku (stays 200k even with global [1m])
+- [x] Model thinking in Overview last-exchange + Exchange chat: collapsible "💭 Thinking" block per assistant bubble; load_chat carries thinking-only records forward to the next reply
+- [x] KEY FINDING: thinking text is NOT persisted unless showThinkingSummaries is on (all transcripts had empty thinking + signature only). Tested: enabling it → transcript gets non-empty thinking (206 chars). Enabled it in settings.json.
+- [x] Thinking only populates going forward (new turns); past turns stay empty. UI shows nothing when thinking absent.
+
+## Iteration 24 (2026-08-12): tool calls in conversation + live activity
+- [x] Exchange chat now captures tool_use blocks (name + key input via _tool_detail) as inline "tool" entries, interleaved with the text bubbles in order; CHAT_MAX_MESSAGES 100→150
+- [x] Live activity: parse the spinner line from the pane ('Ideating… (1m 39s · ↓ 6.2k tokens)') — shown on busy cards + Overview with a pulsing dot
+- [x] pane_status(): one capture-pane returns both mode (bottom line) + activity (spinner line); replaced pane_mode
+- [x] Verified live: busy agent shows 'Ideating… (5m 38s)'; a session's chat surfaced 110 tool calls (Bash/Edit/Write/…)
+
+## Iteration 25 (2026-08-12): richer Overview last-exchange
+- [x] Overview "Last exchange" now shows the live chat tail (last 10 entries) via the shared renderChatEntries — includes tool calls + thinking, not just the last 2 text bubbles
+- [x] Chat is now loaded whenever the modal is open (any tab), not just Exchange; openModal + poll trigger loadChat; last_exchange from /api/state stays as the instant fallback until the chat arrives
+- [x] Frontend-only; verified tail shows tool calls + thinking + messages, and falls back to state before chat loads
+
+## Iteration 26 (2026-08-12): keep user msg + pane-driven working/idle
+- [x] Overview last-exchange anchors on the last user message (was slice(-10) which dropped it on long turns); shows user msg + response tail with a "… N earlier steps" marker when long
+- [x] idle/working was inferred from transcript recency + events → went stale mid-tool. Now the pane spinner ("esc to interrupt" / activity line) is the ground-truth "working" signal in derive_state
+
+## Iteration 27 (2026-08-12): closed sessions lingered on board / send hit the wrong session
+- [x] Root cause 1: the registry (~/.claude/sessions) also holds daemon-hosted background copies of past conversations (`claude bg-spare` / `bg-pty-host` children, ppid=1) — alive but paneless, so closed conversations never left the board
+- [x] Root cause 2: a Ctrl+Z'd claude behind a newer one in the same pane kept its card; its pane target pointed at the *foreground* claude, so sending a message landed in a different conversation ("creates a new session")
+- [x] Fix: an agent must be the foreground process group of a tmux pane (proc_foreground: pgrp == tpgid from /proc/<pid>/stat); hidden entries keep their pids/sids in seen sets so discovery can't reattribute their transcripts
+- [x] Fix: newest_session_id(cwd, since=proc start) — discovery no longer labels a fresh claude with an older conversation that shares the cwd; no transcript yet → synthetic `new-<pid>` sid so the pane still shows
+- [x] Verified live: 13 cards → 6, all pane-backed foreground claudes (incl. --resume'd ones); the 6 daemon copies + 1 suspended claude gone; busy agents unaffected (foreground check holds while tools run). Both servers (:1234 pane, :8842 detached) restarted on the fix
 - Registry status values observed: only `busy`, `idle`. Permission-wait not distinguishable → hooks required.
 - Transcripts can be 80+ MB → tail bytes only, never full parse.
 - Shared box: other users run claude too, but ~/.claude is per-user so no filtering needed beyond the registry.

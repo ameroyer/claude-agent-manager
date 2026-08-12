@@ -391,6 +391,7 @@ function cardHtml(a) {
     </div>
     <div class="project">${esc(a.project)}</div>
     ${nowLine(a)}
+    ${a.activity ? `<div class="card-activity"><span class="spin-dot"></span>${esc(a.activity)}</div>` : ""}
     ${approvalActionsHtml(a)}
     <div class="card-foot">
       ${progress}
@@ -422,27 +423,57 @@ function tabbarHtml(a) {
   </button>`).join("");
 }
 
-function chatBubble(role, text, who, ts) {
+function toolLine(m) {
+  const full = `${m.name || "tool"}${m.detail ? " " + m.detail : ""}`;
+  return `<div class="tool-call" title="${esc(full)}">
+    <span class="tool-call-name">${esc(m.name || "tool")}</span>
+    ${m.detail ? `<span class="tool-call-detail">${esc(m.detail)}</span>` : ""}
+  </div>`;
+}
+
+function chatBubble(role, text, who, ts, thinking) {
+  const think = (role !== "user" && thinking)
+    ? `<details class="think"><summary>Thinking</summary>
+        <div class="think-body">${mdHtml(thinking)}</div></details>`
+    : "";
   return `<div class="msg ${role === "user" ? "user" : "assistant"}">
     <div class="msg-meta">${esc(who)}${ts ? `<span>${msgTime(ts)}</span>` : ""}</div>
+    ${think}
     <div class="msg-text">${mdHtml(text)}</div>
   </div>`;
 }
 
 function lastExchangeHtml(a) {
-  let msgs = a.last_exchange;
-  if (!msgs || !msgs.length) {
-    // fallback: assume the reply follows the prompt
+  // Prefer the live chat tail — shows the recent messages, tool calls and
+  // thinking (what the model is doing now). Fall back to the lightweight
+  // last_exchange from /api/state until the full chat has loaded.
+  let msgs;
+  if (chat.sid === a.sessionId && chat.messages && chat.messages.length) {
+    const all = chat.messages;
+    // Anchor on your last message so it stays visible, then show the response
+    // after it; if that's long, keep your message + the recent tail with a marker.
+    let lu = -1;
+    for (let i = all.length - 1; i >= 0; i--) if (all[i].role === "user") { lu = i; break; }
+    if (lu >= 0) {
+      const turn = all.slice(lu);
+      const TAIL = 11;
+      msgs = turn.length > TAIL + 1
+        ? [turn[0], {role: "gap", count: turn.length - 1 - TAIL}, ...turn.slice(-TAIL)]
+        : turn;
+    } else {
+      msgs = all.slice(-10);
+    }
+  } else if (a.last_exchange && a.last_exchange.length) {
+    msgs = a.last_exchange;
+  } else {
     msgs = [];
     if (a.last_prompt) msgs.push({role: "user", text: a.last_prompt});
     if (a.last_assistant) msgs.push({role: "assistant", text: a.last_assistant});
   }
   if (!msgs.length) return "";
-  const bubbles = msgs.map(m =>
-    chatBubble(m.role, m.text, m.role === "user" ? "You" : (a.display_name || a.name), m.ts));
   return `<div class="section">
     <div class="section-title">Last exchange</div>
-    <div class="chat">${bubbles.join("")}</div></div>`;
+    <div class="chat">${renderChatEntries(a, msgs)}</div></div>`;
 }
 
 function summarySectionHtml(a) {
@@ -484,6 +515,9 @@ function overviewTab(a) {
     out.push(`<div class="section"><div class="notif">⚠ ${esc(a.notification || "Needs your approval")}</div>
       ${detail}${approvalActionsHtml(a)}</div>`);
   }
+  if (a.activity) {
+    out.push(`<div class="section"><div class="card-activity big"><span class="spin-dot"></span>${esc(a.activity)}</div></div>`);
+  }
   out.push(summarySectionHtml(a));
   out.push(modeSelectorHtml(a));
   out.push(detailsSectionHtml(a));
@@ -512,7 +546,8 @@ async function loadChat(sid) {
       const changed = !chat.messages || chat.sid !== sid ||
         JSON.stringify(chat.messages) !== JSON.stringify(d.messages);
       chat = {sid, messages: d.messages || []};
-      if (changed && activeTab === "exchange") renderModal();
+      // Overview's last-exchange also uses the chat, so refresh it too.
+      if (changed && (activeTab === "exchange" || activeTab === "overview")) renderModal();
     }
   } catch { /* next tick retries */ }
 }
@@ -523,6 +558,17 @@ function msgTime(ts) {
   return isNaN(d) ? "" : d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
 }
 
+function renderChatEntries(a, msgs) {
+  const name = a.display_name || a.name;
+  return msgs.map(m => {
+    if (m.role === "gap") {
+      return `<div class="chat-gap">… ${m.count} earlier step${m.count === 1 ? "" : "s"} — open Exchange for the full turn</div>`;
+    }
+    if (m.role === "tool") return toolLine(m);
+    return chatBubble(m.role, m.text, m.role === "user" ? "You" : name, m.ts, m.thinking);
+  }).join("");
+}
+
 function exchangeTab(a) {
   if (chat.sid !== a.sessionId || !chat.messages) {
     return `<div class="section"><div class="chat-loading">Loading conversation…</div></div>`;
@@ -530,9 +576,7 @@ function exchangeTab(a) {
   if (!chat.messages.length) {
     return `<div class="section"><div class="chat-loading">No conversation found in the transcript tail.</div></div>`;
   }
-  const msgs = chat.messages.map(m =>
-    chatBubble(m.role, m.text, m.role === "user" ? "You" : (a.display_name || a.name), m.ts)).join("");
-  return `<div class="section"><div class="chat">${msgs}</div></div>`;
+  return `<div class="section"><div class="chat">${renderChatEntries(a, chat.messages)}</div></div>`;
 }
 
 function modalHtml(a) {
@@ -647,6 +691,7 @@ function openModal(sid) {
   chat = {sid: null, messages: null};
   overlay.classList.remove("hidden");
   renderModal();
+  loadChat(sid);  // populate the Overview's last-exchange tail promptly
   modal.querySelector(".composer-input")?.focus();
 }
 
@@ -809,7 +854,7 @@ async function tick() {
     }
     conn.textContent = `updated ${new Date().toLocaleTimeString()}`;
     conn.classList.remove("err");
-    if (openSid && activeTab === "exchange") loadChat(openSid);
+    if (openSid) loadChat(openSid);  // Overview + Exchange both use the chat
   } catch {
     conn.textContent = "server unreachable";
     conn.classList.add("err");

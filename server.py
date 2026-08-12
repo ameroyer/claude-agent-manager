@@ -33,8 +33,9 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
 CHAT_TAIL_BYTES = 2 * 1024 * 1024
-CHAT_MAX_MESSAGES = 100
+CHAT_MAX_MESSAGES = 150
 CHAT_MAX_CHARS = 20000
+THINK_MAX_CHARS = 8000
 
 
 def run(cmd):
@@ -56,14 +57,39 @@ def read_json(path):
 CONTEXT_WINDOW_OVERRIDE = 0
 
 
-def default_context_window():
-    """Base window: honor a CLI override, else read the [1m] beta flag from the
-    user's model default in settings.json (the only reliable window signal)."""
+# Per-model context window as (default, max-with-1M-beta). The window isn't
+# recorded in any session file, so it's derived: pick the model's row, use the
+# 1M column only when the 1M beta is enabled. Unknown models fall back to
+# DEFAULT_WINDOWS. Edit this table as models change.
+DEFAULT_WINDOWS = (200_000, 1_000_000)
+MODEL_WINDOWS = {
+    "claude-fable-5":    (200_000, 1_000_000),
+    "claude-mythos-5":   (200_000, 1_000_000),
+    "claude-opus-5":     (200_000, 1_000_000),
+    "claude-opus-4-8":   (200_000, 1_000_000),
+    "claude-opus-4-7":   (200_000, 1_000_000),
+    "claude-sonnet-5":   (200_000, 1_000_000),
+    "claude-sonnet-4-5": (200_000, 1_000_000),
+    "claude-haiku-4-5":  (200_000, 200_000),
+}
+
+
+def beta_1m_enabled():
+    settings = read_json(os.path.join(CLAUDE_DIR, "settings.json")) or {}
+    return "[1m]" in settings.get("model", "")
+
+
+def context_window_for(model, ctx_tokens):
+    """Window for a session: its model's row × whether the 1M beta is on. A
+    prompt already past 200k proves the 1M window regardless of the above."""
     if CONTEXT_WINDOW_OVERRIDE:
         return CONTEXT_WINDOW_OVERRIDE
-    settings = read_json(os.path.join(CLAUDE_DIR, "settings.json")) or {}
-    model = settings.get("model", "")
-    return 1_000_000 if "[1m]" in model else 200_000
+    key = (model or "").split("[")[0].strip()
+    default_w, max_w = MODEL_WINDOWS.get(key, DEFAULT_WINDOWS)
+    window = max_w if beta_1m_enabled() else default_w
+    if (ctx_tokens or 0) > 200_000:
+        window = max(window, 1_000_000)
+    return window
 
 
 def pid_alive(pid):
@@ -301,7 +327,11 @@ def load_chat(cwd, session_id):
             lines = lines[1:]
     except Exception:
         return []
+    def cap(s, n):
+        return s[:n] + "\n… [truncated]" if s and len(s) > n else s
+
     messages = []
+    pending_think = []  # thinking from thinking-only records, attached to next reply
     for line in lines:
         try:
             rec = json.loads(line)
@@ -311,19 +341,41 @@ def load_chat(cwd, session_id):
         if t not in ("user", "assistant"):
             continue
         content = (rec.get("message") or {}).get("content")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            text = "\n".join(b.get("text", "") for b in content
-                             if isinstance(b, dict) and b.get("type") == "text")
-        else:
-            continue
-        text = text.strip()
-        if not text or text.startswith("<"):
-            continue
-        if len(text) > CHAT_MAX_CHARS:
-            text = text[:CHAT_MAX_CHARS] + "\n… [truncated]"
-        messages.append({"role": t, "text": text, "ts": rec.get("timestamp")})
+        if t == "assistant":
+            texts, thinks, tools = [], [], []
+            if isinstance(content, list):
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "text":
+                        texts.append(b.get("text", ""))
+                    elif b.get("type") == "thinking":
+                        thinks.append(b.get("thinking") or b.get("text", ""))
+                    elif b.get("type") == "tool_use":
+                        tools.append({"name": b.get("name"),
+                                      "detail": _tool_detail(b.get("name"), b.get("input"))})
+            elif isinstance(content, str):
+                texts.append(content)
+            pending_think += [x for x in thinks if x.strip()]
+            text = "\n".join(texts).strip()
+            if text and not text.startswith("<"):
+                thinking = "\n\n".join(pending_think).strip()
+                pending_think = []
+                messages.append({"role": "assistant", "text": cap(text, CHAT_MAX_CHARS),
+                                 "ts": rec.get("timestamp"),
+                                 "thinking": cap(thinking, THINK_MAX_CHARS) or None})
+            for tu in tools:  # each tool call is its own inline entry
+                messages.append({"role": "tool", "name": tu["name"],
+                                 "detail": tu["detail"], "ts": rec.get("timestamp")})
+        else:  # user
+            if not isinstance(content, str):
+                continue  # tool_result message — not a human turn
+            text = content.strip()
+            if not text or text.startswith("<"):
+                continue
+            pending_think = []  # new human turn; drop any orphan thinking
+            messages.append({"role": "user", "text": cap(text, CHAT_MAX_CHARS),
+                             "ts": rec.get("timestamp"), "thinking": None})
     messages = messages[-CHAT_MAX_MESSAGES:]
     _chat_cache[session_id] = (mtime, messages)
     return messages
@@ -340,13 +392,16 @@ def load_todo_md(cwd):
         return None
 
 
-def derive_state(registry_status, last_event, transcript_mtime=None):
-    """Combine registry busy/idle with hook events into a display state.
+def derive_state(registry_status, last_event, transcript_mtime=None, working=None):
+    """Display state, with the pane spinner as the ground truth for "working".
 
-    A notification is only "current" if the agent hasn't kept working past it
-    (transcript advancing well beyond the event means it was resolved). Permission
-    prompts are needs_input; a finished turn ("waiting for your input") is waiting."""
-    reg_busy = registry_status == "busy"
+    `working` (from pane_status) is True when the pane shows an activity spinner
+    or "esc to interrupt", False when it clearly doesn't, None when unknown (no
+    pane). Events still distinguish the not-working attention states: a permission
+    prompt is needs_input; a finished turn ("waiting for your input"/stop) is
+    waiting. Notifications are ignored once the transcript advanced past them."""
+    if working:
+        return "busy"
     if last_event:
         ev = last_event.get("event")
         ts = last_event.get("ts")
@@ -357,10 +412,10 @@ def derive_state(registry_status, last_event, transcript_mtime=None):
                 return "needs_input"
             return "waiting"
         if ev == "stop" and not stale:
-            return "busy" if reg_busy else "waiting"
-        if ev in ("prompt", "activity"):
-            return "busy" if reg_busy else "idle"
-    return "busy" if reg_busy else "idle"
+            return "waiting"
+    if working is False:
+        return "idle"  # pane confirms nothing is running
+    return "busy" if registry_status == "busy" else "idle"
 
 
 def proc_comm(pid):
@@ -371,44 +426,76 @@ def proc_comm(pid):
         return None
 
 
-def pane_mode(target):
-    """Read the live permission mode from the pane's bottom status line.
+def proc_foreground(pid):
+    """True when the process owns its tty's foreground process group. A claude
+    that was Ctrl+Z'd (or otherwise left behind a newer one in the same pane)
+    fails this — input pasted into the pane would reach a different session."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return False
+    return fields[2] == fields[5]  # pgrp == tpgid
 
-    Only the last non-empty line is inspected — matching anywhere in the pane
-    would pick up mode words in the conversation text, not the real indicator.
-    Line looks like '⏵⏵ auto mode on · …' or '⏸ manual mode on · …'."""
+
+_ACTIVITY_RE = re.compile(r"([A-Z][a-zA-Z]+…\s*\([^)]*\))")
+
+
+def pane_status(target):
+    """One pane capture → the live permission mode and the activity line.
+
+    Mode is the bottom status line ('⏵⏵ auto mode on · …'). Activity is the
+    spinner line while the agent works ('✽ Ideating… (1m 39s · ↓ 6.2k tokens)').
+    Only the bottom line is used for mode so conversation text can't spoof it."""
+    result = {"mode": None, "activity": None, "working": None}
     if not target:
-        return None
-    out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-3"])
+        return result
+    out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-8"])
     lines = [ln for ln in out.splitlines() if ln.strip()]
     if not lines:
-        return None
+        return result
+    result["working"] = False
     footer = lines[-1].lower()
     if "accept edits on" in footer:
-        return "acceptEdits"
-    if "plan mode on" in footer:
-        return "plan"
-    if "auto mode on" in footer:
-        return "auto"
-    if "manual mode on" in footer:
-        return "default"
-    if "bypass" in footer and " on" in footer:
-        return "bypassPermissions"
-    return None
+        result["mode"] = "acceptEdits"
+    elif "plan mode on" in footer:
+        result["mode"] = "plan"
+    elif "auto mode on" in footer:
+        result["mode"] = "auto"
+    elif "manual mode on" in footer:
+        result["mode"] = "default"
+    elif "bypass" in footer and " on" in footer:
+        result["mode"] = "bypassPermissions"
+    for ln in lines:
+        m = _ACTIVITY_RE.search(ln)
+        if m:
+            result["activity"] = m.group(1)
+            break
+    # "esc to interrupt" or a spinner line means the agent is actively working.
+    result["working"] = bool(result["activity"]) or "esc to interrupt" in out.lower()
+    return result
 
 
-def newest_session_id(cwd):
-    """Recover a session id from the newest transcript in the cwd's project dir."""
+def newest_session_id(cwd, since=0):
+    """Recover a session id from the newest transcript in the cwd's project dir.
+    Transcripts last written before `since` (the process start) are ignored —
+    they belong to past conversations that happen to share the cwd."""
     slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     d = os.path.join(PROJECTS_DIR, slug)
+    best = None
     try:
-        files = [f for f in os.listdir(d) if f.endswith(".jsonl")]
+        for f in os.listdir(d):
+            if not f.endswith(".jsonl"):
+                continue
+            try:
+                m = os.path.getmtime(os.path.join(d, f))
+            except OSError:
+                continue
+            if m >= since and (best is None or m > best[0]):
+                best = (m, f)
     except OSError:
         return None
-    if not files:
-        return None
-    files.sort(key=lambda f: os.path.getmtime(os.path.join(d, f)), reverse=True)
-    return files[0][:-len(".jsonl")]
+    return best[1][:-len(".jsonl")] if best else None
 
 
 def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
@@ -422,29 +509,36 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
     for pid in pid_to_pane:
         if pid in seen_pids or proc_comm(pid) != "claude":
             continue
+        if not proc_foreground(pid):
+            continue
         try:
-            if os.stat(f"/proc/{pid}").st_uid != uid:
+            st = os.stat(f"/proc/{pid}")
+            if st.st_uid != uid:
                 continue
             cwd = os.readlink(f"/proc/{pid}/cwd")
         except OSError:
             continue
-        sid = newest_session_id(cwd)
-        if not sid or sid in seen_sids:
+        sid = newest_session_id(cwd, since=st.st_mtime)
+        if sid in seen_sids:
             continue
+        recent = False
+        if sid:
+            try:
+                recent = time.time() - os.path.getmtime(transcript_path(cwd, sid)) < 8
+            except OSError:
+                pass
+        else:
+            sid = f"new-{pid}"  # fresh conversation: no transcript on disk yet
         seen_sids.add(sid)
-        try:
-            recent = time.time() - os.path.getmtime(transcript_path(cwd, sid)) < 8
-        except OSError:
-            recent = False
         out.append({"pid": pid, "sessionId": sid, "cwd": cwd,
                     "status": "busy" if recent else "idle",
                     "name": os.path.basename(cwd.rstrip("/")) or cwd,
                     "nameSource": "derived", "statusUpdatedAt": None,
-                    "startedAt": None})
+                    "startedAt": st.st_mtime})
     return out
 
 
-def build_agent(reg, pid_to_pane, base_window):
+def build_agent(reg, pid_to_pane):
     sid = reg.get("sessionId", "")
     cwd = reg.get("cwd", "")
     pane = pid_to_pane.get(reg["pid"])
@@ -459,18 +553,17 @@ def build_agent(reg, pid_to_pane, base_window):
     lu_i = max((i for i, m in enumerate(chat_msgs) if m["role"] == "user"), default=None)
     la_i = max((i for i, m in enumerate(chat_msgs) if m["role"] == "assistant"), default=None)
     last_exchange = [{"role": chat_msgs[i]["role"], "text": chat_msgs[i]["text"],
-                      "ts": chat_msgs[i].get("ts")}
+                      "ts": chat_msgs[i].get("ts"),
+                      "thinking": (chat_msgs[i].get("thinking") or "")[:2500] or None}
                      for i in sorted(i for i in (lu_i, la_i) if i is not None)]
-    state = derive_state(reg.get("status"), last_event, tinfo["mtime"])
+    pstatus = pane_status(pane["target"]) if pane else {"mode": None, "activity": None, "working": None}
+    state = derive_state(reg.get("status"), last_event, tinfo["mtime"], pstatus["working"])
     notif_msg = None
     if last_event and last_event.get("event") == "notification" and state in ("needs_input", "waiting"):
         notif_msg = last_event.get("message")
     ctx_tokens = tinfo["context_tokens"]
-    # Base window from the user's [1m] setting; a prompt already past 200k
-    # proves the 1M beta regardless of what the base says.
-    ctx_window = base_window
-    if (ctx_tokens or 0) > 200_000:
-        ctx_window = max(base_window, 1_000_000)
+    ctx_model = (tinfo["context_breakdown"] or {}).get("model")
+    ctx_window = context_window_for(ctx_model, ctx_tokens)
     in_progress = [t for t in tasks if t["status"] == "in_progress"]
     status = load_agent_status(sid)
     # Display name: agent-chosen > user rename > AI topic title > derived id
@@ -506,7 +599,8 @@ def build_agent(reg, pid_to_pane, base_window):
         "context_tokens": ctx_tokens,
         "context_window": ctx_window if ctx_tokens else None,
         "context_breakdown": tinfo["context_breakdown"],
-        "permission_mode": pane_mode(pane["target"]) if pane else tinfo["permission_mode"],
+        "permission_mode": pstatus["mode"] or tinfo["permission_mode"],
+        "activity": pstatus["activity"] if state == "busy" else None,
         "pending_tool": tinfo["pending_tool"] if state == "needs_input" else None,
         "agent_status": status,
         "todo_md": load_todo_md(cwd),
@@ -515,9 +609,8 @@ def build_agent(reg, pid_to_pane, base_window):
 
 def build_state():
     pid_to_pane = tmux_pane_index()
-    base_window = default_context_window()
     regs = []
-    seen = set()
+    seen_pids, seen_sids = set(), set()
     if os.path.isdir(SESSIONS_DIR):
         for name in os.listdir(SESSIONS_DIR):
             if not name.endswith(".json"):
@@ -525,11 +618,17 @@ def build_state():
             reg = read_json(os.path.join(SESSIONS_DIR, name))
             if not reg or not pid_alive(reg.get("pid", -1)):
                 continue
-            regs.append(reg)
-            seen.add(reg["pid"])
-    seen_sids = {r.get("sessionId") for r in regs}
-    regs.extend(discover_live_regs(pid_to_pane, seen, seen_sids))
-    agents = [build_agent(reg, pid_to_pane, base_window) for reg in regs]
+            # The registry also holds daemon-hosted background copies of past
+            # conversations (claude bg-spare / bg-pty-host children) and claudes
+            # suspended behind a newer one in the same pane. Neither can receive
+            # input, so only a pane's foreground process counts as an agent —
+            # but keep their pids/sids so discovery can't reattribute them.
+            seen_pids.add(reg["pid"])
+            seen_sids.add(reg.get("sessionId"))
+            if reg["pid"] in pid_to_pane and proc_foreground(reg["pid"]):
+                regs.append(reg)
+    regs.extend(discover_live_regs(pid_to_pane, seen_pids, seen_sids))
+    agents = [build_agent(reg, pid_to_pane) for reg in regs]
     # Stable identity sort; the frontend groups by attention state.
     agents.sort(key=lambda a: (a["project"] or "", a["name"] or ""))
     return {"agents": agents, "generated_at": time.time()}
