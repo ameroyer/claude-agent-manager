@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.lavish/
+scratchpad/
+.DS_Store
+DESIGN.md
