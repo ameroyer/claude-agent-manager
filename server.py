@@ -631,7 +631,11 @@ def build_state():
     agents = [build_agent(reg, pid_to_pane) for reg in regs]
     # Stable identity sort; the frontend groups by attention state.
     agents.sort(key=lambda a: (a["project"] or "", a["name"] or ""))
-    return {"agents": agents, "generated_at": time.time()}
+    spawn_dir = os.path.join(HOME, "projects")
+    if not os.path.isdir(spawn_dir):
+        spawn_dir = HOME
+    return {"agents": agents, "generated_at": time.time(),
+            "spawn_dir": spawn_dir + "/"}
 
 
 _cache = {"t": 0.0, "state": None}

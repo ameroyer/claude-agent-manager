@@ -6,6 +6,7 @@ const modal = document.getElementById("modal");
 let openSid = null;
 let agents = [];
 let lastPayload = "";
+let spawnDir = "~/";  // server expands ~; refined from /api/state
 
 const STATE_LABEL = {
   needs_input: "needs approval",
@@ -812,7 +813,7 @@ const spawnStatus = document.getElementById("spawn-status");
 function openSpawn() {
   spawnStatus.textContent = "";
   spawnOverlay.classList.remove("hidden");
-  if (!spawnCwd.value) spawnCwd.value = "/mnt/weka/home/romain/projects/";
+  if (!spawnCwd.value) spawnCwd.value = spawnDir;
   spawnCwd.focus();
 }
 function closeSpawn() { spawnOverlay.classList.add("hidden"); }
@@ -847,6 +848,7 @@ async function tick() {
     const res = await fetch("/api/state");
     const data = await res.json();
     agents = data.agents || [];
+    spawnDir = data.spawn_dir || spawnDir;
     const key = JSON.stringify(agents) + openSid;
     if (key !== lastPayload) {
       lastPayload = key;
