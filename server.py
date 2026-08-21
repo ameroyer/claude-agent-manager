@@ -13,14 +13,17 @@ Stdlib only. Run: python3 server.py [--port 8842] [--host 127.0.0.1]
 """
 
 import argparse
+import hmac
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 HOME = os.path.expanduser("~")
 CLAUDE_DIR = os.path.join(HOME, ".claude")
@@ -55,6 +58,12 @@ def read_json(path):
 
 # CLI override; 0 = auto-detect from ~/.claude/settings.json
 CONTEXT_WINDOW_OVERRIDE = 0
+
+# Shared secret gating every /api/* request (set in main). Since these endpoints
+# read transcripts and drive agents, the token is the whole security boundary:
+# it defeats CSRF, DNS-rebinding, and shared-host snooping without CORS/Origin
+# juggling. It rides in the dashboard URL fragment and the X-Auth-Token header.
+AUTH_TOKEN = ""
 
 
 # Per-model context window as (default, max-with-1M-beta). The window isn't
@@ -799,25 +808,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _authed(self):
+        supplied = (self.headers.get("X-Auth-Token")
+                    or parse_qs(urlparse(self.path).query).get("token", [""])[0])
+        return hmac.compare_digest(supplied.encode(), AUTH_TOKEN.encode())
+
     def do_GET(self):
-        if self.path == "/api/state":
-            self._send(200, cached_state())
+        route = urlparse(self.path).path
+        if route.startswith("/api/"):
+            if not self._authed():
+                self._send(401, {"error": "unauthorized"})
+                return
+            if route == "/api/state":
+                self._send(200, cached_state())
+                return
+            if route == "/api/chat":
+                sid = parse_qs(urlparse(self.path).query).get("sid", [""])[0]
+                agent = next((a for a in cached_state()["agents"]
+                              if a["sessionId"] == sid), None)
+                self._send(*( (404, {"error": "unknown session"}) if not agent
+                             else (200, {"messages": load_chat(agent["cwd"], sid)}) ))
+                return
+            self._send(404, {"error": "not found"})
             return
-        if self.path.startswith("/api/chat"):
-            from urllib.parse import parse_qs, urlparse
-            sid = parse_qs(urlparse(self.path).query).get("sid", [""])[0]
-            agent = next((a for a in cached_state()["agents"]
-                          if a["sessionId"] == sid), None)
-            if not agent:
-                self._send(404, {"error": "unknown session"})
-            else:
-                self._send(200, {"messages": load_chat(agent["cwd"], sid)})
-            return
+        # Static assets carry no secrets, so they load without the token — the
+        # page bootstraps, then reads the token from its URL fragment for /api/*.
         path = self.path.split("?")[0]
         if path == "/":
             path = "/index.html"
         fpath = os.path.realpath(os.path.join(WEB_DIR, path.lstrip("/")))
-        if fpath.startswith(WEB_DIR) and os.path.isfile(fpath):
+        if fpath.startswith(WEB_DIR + os.sep) and os.path.isfile(fpath):
             ctype = {"html": "text/html", "js": "text/javascript",
                      "css": "text/css"}.get(fpath.rsplit(".", 1)[-1],
                                             "application/octet-stream")
@@ -827,6 +847,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._authed():
+            self._send(401, {"error": "unauthorized"})
+            return
         actions = {"/api/focus": lambda b: focus_pane(b.get("target", "")),
                    "/api/send": lambda b: send_text(b.get("target", ""),
                                                     b.get("text", "")),
@@ -854,13 +877,17 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--context-window", type=int, default=0,
                     help="Force the context window in tokens (0 = auto from settings.json)")
+    ap.add_argument("--token", default=os.environ.get("CAM_TOKEN", ""),
+                    help="Access token (env CAM_TOKEN; a random one is generated if unset)")
     args = ap.parse_args()
-    global CONTEXT_WINDOW_OVERRIDE
+    global CONTEXT_WINDOW_OVERRIDE, AUTH_TOKEN
     CONTEXT_WINDOW_OVERRIDE = args.context_window
+    AUTH_TOKEN = args.token or secrets.token_urlsafe(18)
     os.makedirs(EVENTS_DIR, exist_ok=True)
     os.makedirs(STATUS_DIR, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"claude-agent-manager on http://{args.host}:{args.port}")
+    print(f"claude-agent-manager on http://{args.host}:{args.port}/#{AUTH_TOKEN}", flush=True)
+    print("Open the URL above (the #token part is required).", flush=True)
     server.serve_forever()
 
 

@@ -8,6 +8,11 @@ let agents = [];
 let lastPayload = "";
 let spawnDir = "~/";  // server expands ~; refined from /api/state
 
+// The server gates /api/* on this token; it rides in the URL fragment
+// (never sent on the wire by the browser) and on every request we make.
+const token = location.hash.slice(1);
+const authHeaders = extra => Object.assign({"X-Auth-Token": token}, extra || {});
+
 const STATE_LABEL = {
   needs_input: "needs approval",
   waiting: "waiting for you",
@@ -201,21 +206,6 @@ function mdHtml(text) {
   if (inCode) out.push("</code></pre>");
   flushPara(); closeList();
   return `<div class="md">${out.join("")}</div>`;
-}
-
-/* KaTeX auto-render (CDN; silently skipped when offline) */
-function renderMath(root) {
-  if (typeof renderMathInElement !== "function") return;
-  try {
-    renderMathInElement(root, {
-      delimiters: [
-        {left: "$$", right: "$$", display: true},
-        {left: "\\[", right: "\\]", display: true},
-        {left: "\\(", right: "\\)", display: false},
-      ],
-      throwOnError: false,
-    });
-  } catch { /* malformed math stays as text */ }
 }
 
 /* ---------- minimal todo.md renderer ---------- */
@@ -541,7 +531,8 @@ let chat = {sid: null, messages: null};
 
 async function loadChat(sid) {
   try {
-    const res = await fetch(`/api/chat?sid=${encodeURIComponent(sid)}`);
+    const res = await fetch(`/api/chat?sid=${encodeURIComponent(sid)}`,
+      {headers: authHeaders()});
     const d = await res.json();
     if (openSid === sid) {
       const changed = !chat.messages || chat.sid !== sid ||
@@ -618,7 +609,7 @@ async function post(path, payload) {
   try {
     const res = await fetch(path, {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
+      headers: authHeaders({"Content-Type": "application/json"}),
       body: JSON.stringify(payload),
     });
     return (await res.json()).ok;
@@ -672,7 +663,6 @@ function renderModal() {
   const body = modal.querySelector(".modal-body");
   const scroll = activeTab === lastRenderedTab ? body.scrollTop : 0;
   body.innerHTML = modalHtml(a);
-  renderMath(body);  // before scroll positioning — math changes heights
   const msgs = chat.messages || [];
   const chatKey = activeTab === "exchange"
     ? `${msgs.length}:${msgs[msgs.length - 1]?.text.length || 0}` : "";
@@ -735,11 +725,7 @@ function render() {
 }
 
 function focusTmux(target) {
-  fetch("/api/focus", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({target}),
-  });
+  post("/api/focus", {target});
 }
 
 async function killAgent(btn) {
@@ -845,7 +831,12 @@ spawnName.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventD
 
 async function tick() {
   try {
-    const res = await fetch("/api/state");
+    const res = await fetch("/api/state", {headers: authHeaders()});
+    if (res.status === 401) {
+      conn.textContent = "unauthorized — open the URL (with #token) the server printed";
+      conn.classList.add("err");
+      return;
+    }
     const data = await res.json();
     agents = data.agents || [];
     spawnDir = data.spawn_dir || spawnDir;

@@ -18,7 +18,9 @@ anything special for it to work.
 - Python 3 (standard library only — nothing to `pip install`)
 - tmux
 - Claude Code
-- Linux (it reads `/proc` for process info; probably works on macOS but I haven't tried)
+- Linux on the machine running the server — it reads `/proc` for process info,
+  so it won't run on a macOS host (a macOS *browser* pointed at a Linux box over
+  SSH is fine)
 
 ## Running it
 
@@ -28,13 +30,22 @@ cd claude-agent-manager
 python3 server.py
 ```
 
-Then open http://127.0.0.1:8842.
+On startup it prints a URL with an access token in the fragment, e.g.
+`http://127.0.0.1:8842/#Xk3p…`. Open that exact URL — the token gates every
+`/api/*` call, so the dashboard is inert without it. This is what keeps another
+local user, or a random website you have open, from reading your transcripts or
+driving your agents. Set a fixed token with `--token` or `CAM_TOKEN` if you'd
+rather bookmark it.
 
 If Claude Code is running on a remote machine, forward the port over SSH:
 
 ```bash
 ssh -L 8842:localhost:8842 you@your-box
 ```
+
+Run `server.py` on the remote box (it reads that box's `~/.claude` and `/proc`);
+the browser stays local. It's Linux-only on the server side — it relies on
+`/proc`, so it won't serve from a macOS host.
 
 ## Hooks (recommended)
 
@@ -76,9 +87,21 @@ you restart them.
 ## How it works
 
 The backend is a single Python file using `http.server` — no framework, no
-dependencies. The frontend is plain HTML/CSS/JS, no build step. It reads
-`~/.claude` (session info, transcripts, task lists) and talks to tmux to place
-agents and send them input. The page refreshes about once a second.
+dependencies. The frontend is plain, self-contained HTML/CSS/JS — no build step
+and no external assets, so it works fully offline. It reads `~/.claude` (session
+info, transcripts, task lists) and talks to tmux to place agents and send them
+input. The page refreshes about once a second.
+
+## Security
+
+The dashboard can read every agent's conversation and send them input, so treat
+the server like a key to your machine:
+
+- Every `/api/*` request needs the access token printed at startup. Without it
+  the API returns `401`, so another local user or a website open in your browser
+  can't read your transcripts or drive your agents.
+- Keep it bound to `127.0.0.1` (the default) and reach a remote box over the SSH
+  tunnel above rather than binding to `0.0.0.0`.
 
 ## License
 

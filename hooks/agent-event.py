@@ -6,6 +6,7 @@ The claude-agent-manager dashboard reads these to show needs-input / waiting / b
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -36,7 +37,9 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return
-    sid = payload.get("session_id")
+    # sid becomes a filename, so keep it to id-safe chars (defensive: it's
+    # normally a UUID from Claude Code).
+    sid = re.sub(r"[^A-Za-z0-9_-]", "", payload.get("session_id") or "")
     event = EVENT_MAP.get(payload.get("hook_event_name"))
     if not sid or not event:
         return

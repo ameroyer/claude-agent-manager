@@ -701,7 +701,6 @@ main {
 .md .codeblock { background: var(--page); border: 1px solid var(--hairline); border-radius: 8px; padding: 10px 12px; margin: 6px 0 8px; overflow-x: auto; }
 .md .codeblock code { background: none; padding: 0; white-space: pre; }
 .md a { color: var(--accent); }
-.md .katex-display { margin: 8px 0; overflow-x: auto; }
 
 /* ---------- work graph ---------- */
 .dag-wrap { background: var(--surface-2); border-radius: var(--r-inset); padding: 16px; }
