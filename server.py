@@ -20,6 +20,7 @@ import re
 import secrets
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,7 @@ TASKS_DIR = os.path.join(CLAUDE_DIR, "tasks")
 PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
 EVENTS_DIR = os.path.join(CLAUDE_DIR, "agent-events")
 STATUS_DIR = os.path.join(CLAUDE_DIR, "agent-status")
+NAMES_FILE = os.path.join(CLAUDE_DIR, "agent-manager-names.json")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
@@ -547,7 +549,62 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
     return out
 
 
-def build_agent(reg, pid_to_pane):
+_git_cache = {}
+
+
+def git_info(cwd):
+    """{repo, branch, commit} for cwd's git repo, or None. Cached ~15s per cwd
+    so the fast poll doesn't spawn a git process per agent per tick."""
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    now = time.time()
+    hit = _git_cache.get(cwd)
+    if hit and now - hit[0] < 15:
+        return hit[1]
+    top = run(["git", "-C", cwd, "rev-parse", "--show-toplevel", "--short", "HEAD"]).split()
+    info = None
+    if len(top) == 2:
+        branch = run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+        info = {"repo": os.path.basename(top[0]), "commit": top[1], "branch": branch}
+    _git_cache[cwd] = (now, info)
+    return info
+
+
+def scratchpad_path(cwd, session_id):
+    """Best-guess session scratchpad dir, returned only if it actually exists."""
+    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    for base in (tempfile.gettempdir(), "/tmp", "/private/tmp"):
+        p = os.path.join(base, f"claude-{os.getuid()}", slug, session_id, "scratchpad")
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def load_names():
+    return read_json(NAMES_FILE) or {}
+
+
+def set_name(session_id, name):
+    """Persist a user-chosen display name for a session (empty clears it)."""
+    if not session_id:
+        return False, "no session"
+    name = (name or "").strip()[:60]
+    names = load_names()
+    if name:
+        names[session_id] = name
+    else:
+        names.pop(session_id, None)
+    try:
+        with open(NAMES_FILE + ".tmp", "w") as f:
+            json.dump(names, f)
+        os.replace(NAMES_FILE + ".tmp", NAMES_FILE)  # atomic — no torn writes
+    except Exception as e:
+        return False, str(e)
+    _cache["t"] = 0.0  # reflect the new name on the next poll
+    return True, name or "cleared"
+
+
+def build_agent(reg, pid_to_pane, names=None):
     sid = reg.get("sessionId", "")
     cwd = reg.get("cwd", "")
     pane = pid_to_pane.get(reg["pid"])
@@ -575,8 +632,11 @@ def build_agent(reg, pid_to_pane):
     ctx_window = context_window_for(ctx_model, ctx_tokens)
     in_progress = [t for t in tasks if t["status"] == "in_progress"]
     status = load_agent_status(sid)
-    # Display name: agent-chosen > user rename > AI topic title > derived id
-    if status and status.get("name"):
+    user_name = (names or {}).get(sid)
+    # Display name: user rename > agent-chosen > registry rename > AI title > id
+    if user_name:
+        display_name = user_name
+    elif status and status.get("name"):
         display_name = status["name"]
     elif reg.get("name") and reg.get("nameSource") not in (None, "derived"):
         display_name = reg["name"]
@@ -591,6 +651,9 @@ def build_agent(reg, pid_to_pane):
         "display_name": (display_name or "")[:60] or reg.get("name"),
         "cwd": cwd,
         "project": os.path.basename(cwd.rstrip("/")) or cwd,
+        "git": git_info(cwd),
+        "transcript": transcript_path(cwd, sid) if cwd else None,
+        "scratchpad": scratchpad_path(cwd, sid) if cwd else None,
         "state": state,
         "registry_status": reg.get("status"),
         "statusUpdatedAt": reg.get("statusUpdatedAt"),
@@ -637,7 +700,8 @@ def build_state():
             if reg["pid"] in pid_to_pane and proc_foreground(reg["pid"]):
                 regs.append(reg)
     regs.extend(discover_live_regs(pid_to_pane, seen_pids, seen_sids))
-    agents = [build_agent(reg, pid_to_pane) for reg in regs]
+    names = load_names()
+    agents = [build_agent(reg, pid_to_pane, names) for reg in regs]
     # Stable identity sort; the frontend groups by attention state.
     agents.sort(key=lambda a: (a["project"] or "", a["name"] or ""))
     spawn_dir = os.path.join(HOME, "projects")
@@ -839,8 +903,9 @@ class Handler(BaseHTTPRequestHandler):
         fpath = os.path.realpath(os.path.join(WEB_DIR, path.lstrip("/")))
         if fpath.startswith(WEB_DIR + os.sep) and os.path.isfile(fpath):
             ctype = {"html": "text/html", "js": "text/javascript",
-                     "css": "text/css"}.get(fpath.rsplit(".", 1)[-1],
-                                            "application/octet-stream")
+                     "css": "text/css",
+                     "svg": "image/svg+xml"}.get(fpath.rsplit(".", 1)[-1],
+                                                 "application/octet-stream")
             with open(fpath, "rb") as f:
                 self._send(200, f.read(), ctype)
         else:
@@ -856,6 +921,8 @@ class Handler(BaseHTTPRequestHandler):
                    "/api/key": lambda b: send_key(b.get("target", ""),
                                                   b.get("key", "")),
                    "/api/kill": lambda b: kill_session(b.get("sid", "")),
+                   "/api/rename": lambda b: set_name(b.get("sid", ""),
+                                                     b.get("name", "")),
                    "/api/spawn": lambda b: spawn_session(b.get("cwd", ""),
                                                          b.get("prompt", ""),
                                                          b.get("name", ""))}

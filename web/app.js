@@ -5,6 +5,7 @@ const overlay = document.getElementById("modal-overlay");
 const modal = document.getElementById("modal");
 let openSid = null;
 let agents = [];
+let editingName = false;  // pause head re-render while the rename input is open
 let lastPayload = "";
 let spawnDir = "~/";  // server expands ~; refined from /api/state
 
@@ -39,6 +40,138 @@ function badge(state, extraClass = "") {
   const pulse = state === "needs_input" || state === "busy" ? "pulse" : "";
   return `<span class="badge ${esc(state)} ${extraClass}">
     <span class="dot ${pulse}"></span>${STATE_LABEL[state] || esc(state)}</span>`;
+}
+
+function whenAbs(ts) {
+  if (!ts) return "";
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  const d = new Date(ms);
+  return isNaN(d) ? "" : d.toLocaleString();
+}
+
+function fmtDuration(ts) {
+  if (!ts) return "–";
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  let s = Math.max(0, (Date.now() - ms) / 1000);
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+/* ---------- pixel mascot (a little Tamagotchi Claude per session) ----------
+   Body colour = model family (see legend). Hat + accent = deterministic from the
+   repo (or dir) so agents that share a repo look like a family. Face = live
+   state, so the pet's mood tracks what the agent is doing. */
+
+/* Monokai-pastel skins; "other" keeps the authentic clay Claude. */
+const MODEL_SKIN = {
+  fable:  {label: "Fable",  body: "#ff6188", outline: "#b23557"},
+  opus:   {label: "Opus",   body: "#ab9df2", outline: "#7568b8"},
+  sonnet: {label: "Sonnet", body: "#78dce8", outline: "#4899a5"},
+  haiku:  {label: "Haiku",  body: "#a9dc76", outline: "#6f9c48"},
+  other:  {label: "Claude", body: "#d08b6c", outline: "#9a5c40"},
+};
+const MODEL_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
+
+function modelFamily(model) {
+  const m = (model || "").toLowerCase();
+  if (m.includes("fable") || m.includes("mythos")) return "fable";
+  if (m.includes("opus")) return "opus";
+  if (m.includes("sonnet")) return "sonnet";
+  if (m.includes("haiku")) return "haiku";
+  return "other";
+}
+
+function hashStr(s) {
+  let h = 2166136261;
+  for (let i = 0; i < String(s).length; i++) {
+    h ^= String(s).charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+// Fantasy kit (hat/held item) picked deterministically per repo, tinted by ACCENT.
+const KITS = ["king", "knight", "princess", "wizard", "fairy", "mage", "guardian", "warrior"];
+const ACCENTS = ["#ffd866", "#ff6188", "#78dce8", "#ab9df2", "#fc9867", "#a9dc76", "#8fb8ff", "#ffa7c4"];
+
+function critterOf(a) {
+  const model = (a.context_breakdown || {}).model;
+  const skin = MODEL_SKIN[modelFamily(model)];
+  const key = a.git?.repo ? "repo:" + a.git.repo : "dir:" + (a.cwd || a.sessionId);
+  const h = hashStr(key);
+  return {skin, kit: KITS[h % KITS.length], accent: ACCENTS[(h >> 5) % ACCENTS.length]};
+}
+
+/* The pet IS the Claude Code creature: one big rectangle, two little arm nubs
+   just below the middle, four stubby legs, and fixed rectangular pupils.
+   Body colour = model, kit = repo. 18 wide × 16 tall grid. */
+const CREATURE = (() => {
+  const c = [];
+  for (let y = 4; y <= 11; y++) for (let x = 3; x <= 14; x++) {
+    const corner = (x === 3 || x === 14) && (y === 4 || y === 11);
+    if (!corner) c.push([x, y, "T"]);
+  }
+  // arm nubs, a bit below the middle
+  [[1,7],[2,7],[1,8],[2,8],[15,7],[16,7],[15,8],[16,8]].forEach(([x, y]) => c.push([x, y, "T"]));
+  [4, 7, 10, 13].forEach(x => { c.push([x, 12, "t"]); c.push([x, 13, "t"]); });
+  return c;
+})();
+
+const CLR = {A: null, G: "#ffd866", S: "#c7ced6", W: "#fdf6ee", D: "#9a6b3f",
+             E: "#2d2a2e", z: "#78dce8"};
+const paint = (role, accent) => CLR[role] || accent;
+
+// The eyes never change: two 1×2 rectangular pupils. Idle just dreams in zzz.
+const EYES = [[6,6,"E"],[6,7,"E"],[11,6,"E"],[11,7,"E"]];
+const ZZZ = [[1,1,"z"],[2,0,"z"],[2,2,"z"]];
+
+// Kits: [x, y, role] — G gold, S steel, W white, D wood, A repo accent.
+// Hats live in rows 0–3; held items attach at the arms (rows 7–8).
+const KIT = {
+  king:    [[5,2,"G"],[8,2,"G"],[11,2,"G"],
+            [5,3,"G"],[6,3,"G"],[7,3,"A"],[8,3,"G"],[9,3,"G"],[10,3,"A"],[11,3,"G"],[12,3,"G"]],
+  knight:  [[8,0,"A"],[8,1,"A"],[9,1,"A"],
+            [5,2,"S"],[6,2,"S"],[7,2,"S"],[8,2,"S"],[9,2,"S"],[10,2,"S"],[11,2,"S"],[12,2,"S"],
+            [5,3,"S"],[6,3,"S"],[11,3,"S"],[12,3,"S"]],
+  princess:[[10,0,"A"],[9,1,"A"],[10,1,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
+            [8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],
+            [11,0,"W"],[12,1,"W"],[13,2,"W"]],                        // hennin + veil
+  wizard:  [[8,0,"G"],[8,1,"A"],[9,1,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],
+            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"],
+            [16,3,"G"],[16,4,"D"],[16,5,"D"],[16,6,"D"],[15,2,"A"],[17,2,"A"]],  // + wand in hand
+  fairy:   [[2,3,"W"],[1,4,"W"],[2,4,"W"],[0,5,"W"],[1,5,"A"],[2,5,"W"],[1,6,"W"],[2,6,"A"],
+            [15,3,"W"],[15,4,"W"],[16,4,"W"],[17,5,"W"],[16,5,"A"],[15,5,"W"],[16,6,"W"],[15,6,"A"],
+            [9,0,"G"],[8,1,"G"],[10,1,"G"],[9,2,"G"]],  // big wings + a little sparkle halo
+  mage:    [[1,2,"A"],[0,1,"G"],[2,1,"G"],[1,3,"D"],[1,4,"D"],[1,5,"D"],[1,6,"D"]],  // orb staff
+  guardian:[[16,5,"S"],[17,5,"S"],[16,6,"S"],[17,6,"S"],[16,7,"A"],[17,7,"A"],
+            [16,8,"S"],[17,8,"S"],[16,9,"S"],[17,9,"S"],[16,10,"S"],[17,10,"S"]],  // shield
+  warrior: [[16,0,"W"],[16,1,"S"],[16,2,"S"],[16,3,"S"],[16,4,"S"],[16,5,"S"],
+            [15,6,"G"],[16,6,"G"],[17,6,"G"]],                        // sword held high
+};
+
+function mascotSvg(a, cls = "") {
+  const {skin, kit, accent} = critterOf(a);
+  const px = [];
+  const cell = (x, y, c) =>
+    px.push(`<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${c}"/>`);
+  CREATURE.forEach(([x, y, r]) => cell(x, y, r === "T" ? skin.body : skin.outline));
+  (KIT[kit] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+  EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+  if (a.state === "idle") ZZZ.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${cls}"
+    viewBox="0 0 18 14.2" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
+    aria-hidden="true">${px.join("")}</svg>`;
+}
+
+function legendHtml() {
+  return `<div class="legend" title="Mascot colour = model">
+    ${MODEL_ORDER.map(k => `<span class="legend-item">
+      <span class="legend-dot" style="background:${MODEL_SKIN[k].body}"></span>${MODEL_SKIN[k].label}</span>`).join("")}
+  </div>`;
 }
 
 /* ---------- generic DAG (SVG) ----------
@@ -343,53 +476,52 @@ function pendingLabel(a) {
   return a.notification || "Needs your approval";
 }
 
-function nowLine(a) {
-  if (a.state === "needs_input") {
-    return `<div class="card-now attn">⚠ ${esc(pendingLabel(a))}</div>`;
-  }
-  if (a.state === "waiting") {
-    return `<div class="card-now wait">⏸ ${esc(a.notification || "Waiting for your input")}</div>`;
-  }
-  if (a.current_task) {
-    return `<div class="card-now active">▶ ${esc(a.current_task)}</div>`;
-  }
-  const s = summaryLine(a);
-  if (s) return `<div class="card-now">${esc(s)}</div>`;
-  return `<div class="card-now dim">${STATE_LABEL[a.state] || esc(a.state)}</div>`;
-}
-
 function cardHtml(a) {
   const tasks = a.tasks || [];
   const done = tasks.filter(t => t.status === "completed").length;
-  const active = tasks.filter(t => t.status === "in_progress").length;
   const total = tasks.length;
+  const model = MODEL_SKIN[modelFamily((a.context_breakdown || {}).model)];
+  const accent = critterOf(a).accent;
 
-  const progress = total
-    ? `<div class="progress-bar">
-        <div class="seg-done" style="flex:${done}"></div>
-        <div class="seg-active" style="flex:${active}"></div>
-        <div style="flex:${total - done - active}"></div>
+  const ctx = contextInfo(a);
+  const mood = a.state === "needs_input" ? `⚠ ${pendingLabel(a)}`
+    : a.state === "waiting" ? `⏸ ${a.notification || "Waiting for your input"}`
+    : a.activity ? `▶ ${a.activity}`
+    : a.current_task ? `▶ ${a.current_task}`
+    : summaryLine(a) || STATE_LABEL[a.state] || a.state;
+
+  return `<div class="card tama ${esc(a.state)}" data-sid="${esc(a.sessionId)}"
+    style="--pet-accent:${accent}">
+    <div class="tama-screen">
+      <div class="tama-top">
+        <span class="state-ico ${esc(a.state)}" title="${STATE_LABEL[a.state] || ""}">${STATE_ICON[a.state] || "○"}</span>
+        <span class="agent-name" title="${esc(a.name)} — click to open, rename inside">${esc(a.display_name || a.name)}</span>
+        <span class="model-tag" title="Model — the pet's colour">${esc(model.label)}</span>
       </div>
-      <span class="progress-label">${done}/${total}</span>`
-    : `<span class="progress-label dim">no tasks</span>`;
-
-  return `<div class="card ${esc(a.state)}" data-sid="${esc(a.sessionId)}">
-    <div class="card-head">
-      <span class="state-ico ${esc(a.state)}" title="${STATE_LABEL[a.state] || ""}">${STATE_ICON[a.state] || "○"}</span>
-      <span class="agent-name" title="${esc(a.name)}">${esc(a.display_name || a.name)}</span>
-      ${a.tmux ? `<button class="tmux-btn" data-target="${esc(a.tmux.target)}"
-         title="Jump your tmux client here">${esc(a.tmux.target)}</button>` : ""}
+      <div class="tama-mid">
+        <div class="tama-stats">
+          ${ctx ? `<div class="stat-big ${ctx.level}" title="Context window used: ${ctx.label}. Higher = closer to compacting.">
+            <span class="stat-num">${ctx.pct}</span><span class="stat-unit">% ctx</span></div>` : ""}
+          <div class="stat-sub" title="${done}/${total} tasks done">${total ? `${done}/${total} tasks` : "no tasks"}</div>
+          <div class="stat-sub state-word ${esc(a.state)}">${STATE_LABEL[a.state] || esc(a.state)}</div>
+        </div>
+        <div class="tama-pet">${mascotSvg(a)}<div class="pet-ground"></div></div>
+      </div>
+      <div class="mood-pill ${esc(a.state)}" title="${esc(mood)}">${esc(mood)}</div>
+      ${approvalActionsHtml(a)}
     </div>
-    <div class="project">${esc(a.project)}</div>
-    ${nowLine(a)}
-    ${a.activity ? `<div class="card-activity"><span class="spin-dot"></span>${esc(a.activity)}</div>` : ""}
-    ${approvalActionsHtml(a)}
-    <div class="card-foot">
-      ${progress}
-      ${a.permission_mode ? `<span class="mode-chip" title="Permission mode">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>` : ""}
-      ${(() => { const c = contextInfo(a); return c
-        ? `<span class="ctx-chip ${c.level}" title="Context window: ${c.label}">${c.pct}%</span>` : ""; })()}
-      <span class="time">${ago(a.transcript_mtime)}</span>
+    <div class="tama-buttons" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div class="shell-meta">
+      <div title="Working directory"><b>dir</b> ${esc(a.cwd)}</div>
+      ${a.git ? `<div title="git repository · branch @ commit"><b>git</b> ${esc(a.git.repo)} · ${esc(a.git.branch)} @ ${esc(a.git.commit)}</div>` : ""}
+      <div title="Session started ${esc(whenAbs(a.startedAt))} — id ${esc(a.sessionId)}">
+        <b>born</b> ${ago(a.startedAt)} <span class="sid">#${esc((a.sessionId || "").slice(0, 8))}</span></div>
+    </div>
+    <div class="tama-foot">
+      ${a.permission_mode ? `<span class="mode-chip" title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>` : ""}
+      ${a.tmux ? `<button class="tmux-btn" data-target="${esc(a.tmux.target)}"
+         title="tmux ${esc(a.tmux.target)} = session:window.pane — click to jump your terminal here">${esc(a.tmux.target)}</button>` : ""}
+      <span class="time" title="Last activity">${ago(a.transcript_mtime)}</span>
     </div>
   </div>`;
 }
@@ -480,12 +612,16 @@ function detailsSectionHtml(a) {
   const tasks = a.tasks || [];
   const done = tasks.filter(t => t.status === "completed").length;
   const rows = [
-    ["Session", a.name],
+    ["Session ID", a.sessionId],
     ["Path", a.cwd],
+    ["Repo", a.git ? `${a.git.repo} · ${a.git.branch} @ ${a.git.commit}` : "—"],
     ["tmux", a.tmux ? a.tmux.target : "not found"],
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
-    ["Started", ago(a.startedAt)],
+    ["Born", a.startedAt ? `${whenAbs(a.startedAt)} (${ago(a.startedAt)})` : "–"],
+    ["Runtime", fmtDuration(a.startedAt)],
     ["Last activity", ago(a.transcript_mtime)],
+    ["Transcript", a.transcript || "—"],
+    ["Scratchpad", a.scratchpad || "— (none yet)"],
     ["pid", a.pid],
   ];
   return `<div class="section">
@@ -581,10 +717,16 @@ function modalHtml(a) {
 }
 
 function modalHeadHtml(a) {
-  return `${badge(a.state)}
-    <span class="agent-name" title="${esc(a.name)}">${esc(a.display_name || a.name)}</span>
-    <span class="project" style="margin:0;flex:1">${esc(a.cwd)}</span>
-    ${a.tmux ? `<button class="tmux-btn" data-target="${esc(a.tmux.target)}">${esc(a.tmux.target)}</button>` : ""}
+  const model = MODEL_SKIN[modelFamily((a.context_breakdown || {}).model)];
+  return `<span class="modal-pet">${mascotSvg(a, "modal-mascot")}</span>
+    ${badge(a.state)}
+    <span class="name-holder">
+      <span class="agent-name" title="${esc(a.name)}">${esc(a.display_name || a.name)}</span>
+      <button class="rename-btn" title="Rename this pet">✎</button>
+    </span>
+    <span class="model-tag" style="color:${model.outline}" title="Model — mascot colour">${esc(model.label)}</span>
+    <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
+    ${a.tmux ? `<button class="tmux-btn" data-target="${esc(a.tmux.target)}" title="tmux ${esc(a.tmux.target)} — click to focus">${esc(a.tmux.target)}</button>` : ""}
     <button class="kill-btn" data-sid="${esc(a.sessionId)}" title="Terminate this agent">Kill</button>
     <button class="modal-close" title="Close (Esc)">✕</button>`;
 }
@@ -603,6 +745,30 @@ function composerHtml(a) {
 
 function currentAgent() {
   return agents.find(x => x.sessionId === openSid);
+}
+
+function startRename() {
+  const a = currentAgent();
+  const holder = modal.querySelector(".name-holder");
+  if (!a || !holder) return;
+  editingName = true;
+  holder.innerHTML =
+    `<input class="rename-input" maxlength="60" value="${esc(a.display_name || a.name || "")}">`;
+  const inp = holder.querySelector(".rename-input");
+  inp.focus();
+  inp.select();
+  inp.addEventListener("keydown", async e => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      await post("/api/rename", {sid: a.sessionId, name: inp.value.trim()});
+      editingName = false;
+      tick();
+    } else if (e.key === "Escape") {
+      editingName = false;
+      renderModal();
+    }
+  });
+  inp.addEventListener("blur", () => { editingName = false; renderModal(); });
 }
 
 async function post(path, payload) {
@@ -658,7 +824,7 @@ function renderModal() {
     wireComposer();
   }
   if (!TABS.find(t => t.id === activeTab)?.show(a)) activeTab = "overview";
-  modal.querySelector(".modal-head").innerHTML = modalHeadHtml(a);
+  if (!editingName) modal.querySelector(".modal-head").innerHTML = modalHeadHtml(a);
   modal.querySelector(".tabbar").innerHTML = tabbarHtml(a);
   const body = modal.querySelector(".modal-body");
   const scroll = activeTab === lastRenderedTab ? body.scrollTop : 0;
@@ -677,7 +843,7 @@ function renderModal() {
 
 function openModal(sid) {
   openSid = sid;
-  activeTab = "overview";
+  activeTab = "exchange";  // land on the conversation, scrolled to the latest
   lastRenderedTab = null;
   chat = {sid: null, messages: null};
   overlay.classList.remove("hidden");
@@ -720,9 +886,14 @@ function render() {
       }).join("")
     : `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`;
   document.title = agents.some(a => a.state === "needs_input")
-    ? "⚠ claude-agent-manager" : "claude-agent-manager";
+    ? "⚠ TamaClaudchi" : "TamaClaudchi";
   if (openSid) renderModal();
 }
+
+document.getElementById("legend").innerHTML = legendHtml();
+// the brand mark is a resident pet: clay Claude wearing the crown
+document.querySelector(".brand-mark").innerHTML =
+  mascotSvg({state: "busy", cwd: "brand", sessionId: "brand", git: {repo: "brand"}});
 
 function focusTmux(target) {
   post("/api/focus", {target});
@@ -767,6 +938,11 @@ document.body.addEventListener("click", e => {
   if (kill) {
     e.stopPropagation();
     killAgent(kill);
+    return;
+  }
+  if (e.target.closest(".rename-btn")) {
+    e.stopPropagation();
+    startRename();
     return;
   }
   if (e.target.closest(".modal-close") || e.target === overlay) {

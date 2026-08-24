@@ -1,6 +1,9 @@
-# claude-agent-manager
+# claude-agent-manager (TamaClaudchi)
 
-A little web dashboard for keeping an eye on several Claude Code agents at once.
+A little web dashboard for keeping an eye on several Claude Code agents at once —
+styled as a shelf of Tamagotchi-like handhelds, one pixel-Claude pet per session.
+Pet colour = model, outfit = repo (agents in the same repo dress alike), and the
+mood pill + face track what the agent is doing right now.
 
 I usually have a handful of Claude Code sessions running in tmux, each in its own
 window, and I kept losing track of which ones were stuck waiting on me. So this
@@ -81,6 +84,10 @@ you restart them.
   being requested (e.g. `Bash: rm -rf …`).
 - Type a message to an agent and it lands in that pane.
 - Spawn a new agent (pick a folder + optional first message) or kill one.
+- Rename a session from its popup (the ✎ next to the name); names persist in
+  `~/.claude/agent-manager-names.json`.
+- See each card's working directory, git repo · branch @ commit, birth time, and
+  session id at a glance; the popup adds runtime, transcript and scratchpad paths.
 - Keep an eye on each agent's context-window usage so you can tell when one is
   about to compact.
 
