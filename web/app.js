@@ -776,7 +776,7 @@ function composerHtml(a) {
     return `<div class="composer"><span class="composer-note">No tmux pane found — can't send input.</span></div>`;
   }
   return `<div class="composer">
-    <textarea class="composer-input" rows="1"
+    <textarea class="composer-input" rows="3"
       placeholder="Message ${esc(a.name)}…  (Enter to send, Shift+Enter for newline)"></textarea>
     <button class="send-btn">Send</button>
     <span class="composer-status"></span>
@@ -811,6 +811,7 @@ function startRename() {
   inp.addEventListener("blur", () => { editingName = false; renderModal(); });
 }
 
+/* Returns the server's {ok, msg} so callers can show why something failed. */
 async function post(path, payload) {
   try {
     const res = await fetch(path, {
@@ -818,10 +819,21 @@ async function post(path, payload) {
       headers: authHeaders({"Content-Type": "application/json"}),
       body: JSON.stringify(payload),
     });
-    return (await res.json()).ok;
-  } catch {
-    return false;
+    return await res.json();
+  } catch (e) {
+    return {ok: false, msg: String(e)};
   }
+}
+
+let toastTimer = null;
+function toast(msg, isErr) {
+  document.querySelectorAll(".toast").forEach(t => t.remove());
+  const el = document.createElement("div");
+  el.className = "toast" + (isErr ? " err" : "");
+  el.textContent = msg;
+  document.body.appendChild(el);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), 7000);
 }
 
 function flashStatus(ok) {
@@ -838,12 +850,19 @@ async function sendMessage() {
   if (!a?.tmux || !input || !input.value.trim()) return;
   const text = input.value;
   input.value = "";
-  flashStatus(await post("/api/send", {target: a.tmux.target, text}));
+  flashStatus((await post("/api/send", {target: a.tmux.target, text})).ok);
 }
 
 function wireComposer() {
   const input = modal.querySelector(".composer-input");
   if (!input) return;
+  // remember however tall you dragged the reply box
+  try { if (localStorage.tamaComposerH) input.style.height = localStorage.tamaComposerH; }
+  catch { /* private mode */ }
+  new ResizeObserver(() => {
+    try { localStorage.tamaComposerH = input.style.height || input.offsetHeight + "px"; }
+    catch { /* private mode */ }
+  }).observe(input);
   input.addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -915,7 +934,7 @@ function render() {
     .filter(([, n]) => n)
     .map(([s, n]) => `<span class="stat ${s}"><span class="dot ${s}"></span><b>${n}</b> ${STATE_LABEL[s]}</span>`)
     .join("");
-  if (grid.querySelector(".model-pick")) return;  // don't yank an open picker
+  if (grid.querySelector(".model-menu")) return;  // don't yank an open picker
   grid.innerHTML = agents.length
     ? GROUPS.map(g => {
         const list = agents.filter(a => g.states.includes(a.state));
@@ -934,6 +953,27 @@ function render() {
   if (openSid) renderModal();
 }
 
+/* ---------- theme switch ---------- */
+const themeBtn = document.getElementById("theme-toggle");
+const systemDark = () => {
+  try { return matchMedia("(prefers-color-scheme: dark)").matches; } catch { return false; }
+};
+let theme = (() => {
+  try { return localStorage.tamaTheme || (systemDark() ? "dark" : "light"); }
+  catch { return systemDark() ? "dark" : "light"; }
+})();
+function applyTheme() {
+  document.documentElement.setAttribute("data-theme", theme);
+  themeBtn.textContent = theme === "dark" ? "☾" : "☀";
+  themeBtn.title = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+}
+themeBtn.addEventListener("click", () => {
+  theme = theme === "dark" ? "light" : "dark";
+  try { localStorage.tamaTheme = theme; } catch { /* private mode */ }
+  applyTheme();
+});
+applyTheme();
+
 document.getElementById("legend").innerHTML = legendHtml();
 // the brand mark is a resident pet: clay Claude wearing the crown
 document.querySelector(".brand-mark").innerHTML =
@@ -950,19 +990,25 @@ const MODEL_IDS = {Fable: "claude-fable-5", Opus: "claude-opus-5",
                    Sonnet: "claude-sonnet-5", Haiku: "claude-haiku-4-5"};
 
 function openModelPick(btn) {
-  const sel = document.createElement("select");
-  sel.className = "model-pick";
-  sel.innerHTML = `<option value="">model…</option>` +
-    Object.entries(MODEL_IDS).map(([l, id]) => `<option value="${id}">${l}</option>`).join("");
-  btn.replaceWith(sel);
-  sel.focus();
-  const done = () => { if (sel.isConnected) sel.replaceWith(btn); };
-  sel.addEventListener("click", e => e.stopPropagation());
-  sel.addEventListener("change", async () => {
-    if (sel.value) await post("/api/model", {target: btn.dataset.target, model: sel.value});
-    done();
+  document.querySelectorAll(".model-menu").forEach(m => m.remove());
+  const menu = document.createElement("div");
+  menu.className = "model-menu";
+  menu.innerHTML = Object.entries(MODEL_IDS)
+    .map(([label, id]) => `<button data-model="${esc(id)}">${esc(label)}</button>`).join("");
+  btn.closest(".card").appendChild(menu);
+  menu.addEventListener("click", async e => {
+    e.stopPropagation();
+    const b = e.target.closest("button[data-model]");
+    if (!b) return;
+    b.textContent = "…";
+    const r = await post("/api/model", {target: btn.dataset.target, model: b.dataset.model});
+    menu.remove();
+    toast(r.ok ? `Sent /model ${b.dataset.model}. The pill updates after the next reply.\n${r.msg}`
+               : `Model switch failed: ${r.msg}`, !r.ok);
   });
-  sel.addEventListener("blur", done);
+  // close on the next outside click (deferred so this very click doesn't count)
+  setTimeout(() => document.addEventListener("click",
+    () => menu.remove(), {once: true}), 0);
 }
 
 async function killAgent(btn) {
@@ -980,7 +1026,7 @@ async function killAgent(btn) {
     return;
   }
   btn.textContent = "Killing…";
-  const ok = await post("/api/kill", {sid: btn.dataset.sid});
+  const ok = (await post("/api/kill", {sid: btn.dataset.sid})).ok;
   if (ok) { closeModal(); tick(); }
   else { btn.textContent = "Kill failed"; }
 }
@@ -1076,9 +1122,9 @@ async function doSpawn() {
   if (!cwd) { spawnCwd.focus(); return; }
   spawnStatus.textContent = "launching…";
   spawnStatus.className = "composer-status";
-  const ok = await post("/api/spawn",
+  const ok = (await post("/api/spawn",
     {cwd, name: spawnName.value, prompt: spawnPrompt.value,
-     resume: spawnResume.value});
+     resume: spawnResume.value})).ok;
   if (ok) {
     spawnName.value = "";
     spawnPrompt.value = "";

@@ -832,23 +832,29 @@ _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._\[\]-]{1,64}$")
 
 
 def set_model(target, model):
-    """Type `/model <id>` into the session (typed, not pasted, so the CLI
-    parses it as a slash command). C-u first clears any half-typed input."""
-    if not valid_pane(target):
-        return False, "unknown pane"
+    """Type `/model <id>` into the session (typed, not pasted, so the CLI parses
+    it as a slash command) and report back what the pane shows, since the switch
+    is otherwise invisible until the session's next reply. Deliberately never
+    sends Escape: that would interrupt an agent mid-turn."""
     if not _MODEL_ID_RE.fullmatch(model or ""):
         return False, "bad model id"
+    if not valid_pane(target):
+        return False, "unknown pane"
     try:
         subprocess.run(["tmux", "send-keys", "-t", target, "C-u"],
                        timeout=5, check=True)
         subprocess.run(["tmux", "send-keys", "-t", target, "-l", f"/model {model}"],
                        timeout=5, check=True)
-        time.sleep(0.35)  # let the command autocomplete settle
+        time.sleep(0.5)  # let the slash-command autocomplete settle
         subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
                        timeout=5, check=True)
+        time.sleep(0.8)  # let the CLI redraw before we look
     except Exception as e:
         return False, str(e)
-    return True, f"sent /model {model}"
+    tail = [ln.strip() for ln in
+            run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-6"]).splitlines()
+            if ln.strip()]
+    return True, " | ".join(tail[-2:]) if tail else "sent"
 
 
 ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "y", "n"}

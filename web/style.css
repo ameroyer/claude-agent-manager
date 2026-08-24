@@ -2,46 +2,50 @@
    Cards are devices: charcoal shell, cream LCD, three buttons. Pet colour =
    model, outfit = repo, mood pill = live state. Monokai-pastel accents. */
 
-/* Light-first, Monokai-inspired: warm paper desk, charcoal (#2d2a2e-family)
-   device shells, soft cream LCDs, and Monokai's pastel accents (pink #ff6188,
-   purple #ab9df2, blue #78dce8, green #a9dc76, orange #fc9867, yellow #ffd866). */
+/* Two deliberate worlds, both built from the same tokens.
+   LIGHT = pastel desk: near-white page, soft lavender devices, cream screens.
+   DARK  = Monokai night: charcoal page and devices, same cream screens.
+   Three states: bare :root is light; the media query covers "system" (no
+   stamp); [data-theme] wins for an explicit choice in either direction. */
 :root {
   color-scheme: light;
-  --page: #f2efe7;
-  --surface: #fbf9f2;
-  --surface-2: #f1ede2;
-  --surface-3: #e5e0d1;
-  --ink: #2d2a2e;
-  --ink-2: #56525a;
-  --muted: #918e94;
-  --hairline: #ddd8cc;
-  --border: rgba(45, 42, 46, 0.15);
-  --good: #59852e;
-  --warning: #9c6f00;
-  --critical: #cf3560;
-  --accent: #fc9867;
+  --page: #faf6fb;
+  --surface: #ffffff;
+  --surface-2: #f6f1f8;
+  --surface-3: #ebe4ee;
+  --ink: #3b3340;
+  --ink-2: #635a6b;
+  --muted: #9b93a3;
+  --hairline: #e8e1ec;
+  --border: rgba(59, 51, 64, 0.14);
+  --good: #5c9e57;
+  --warning: #b5822a;
+  --critical: #d4657f;
+  --accent: #e8825a;
+  --accent-ink: #ffffff;
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
-  --shadow-card: 0 1px 2px rgba(45,42,46,0.08), 0 8px 22px rgba(45,42,46,0.10);
-  --shadow-modal: 0 24px 70px rgba(45,42,46,0.25), 0 4px 16px rgba(45,42,46,0.15);
-  --dot: rgba(45, 42, 46, 0.06);
+  --shadow-card: 0 1px 2px rgba(59,51,64,0.07), 0 8px 22px rgba(59,51,64,0.09);
+  --shadow-modal: 0 24px 70px rgba(59,51,64,0.22), 0 4px 16px rgba(59,51,64,0.12);
+  --dot: rgba(90, 70, 100, 0.055);
   /* the device */
-  --shell: #2d2a2e;
-  --shell-edge: #19171a;
-  --shell-ink: #fcfcfa;
-  --shell-ink-dim: #a8a5a0;
-  --lcd: #fdf9ec;
-  --lcd-hi: #fffdf6;
-  --lcd-ink: #2d2a2e;
-  --lcd-dim: #8a8578;
-  --header-bg: #2d2a2e;
-  --header-ink: #fcfcfa;
+  --shell: #ded3ea;
+  --shell-edge: #b3a3c8;
+  --shell-ink: #453d50;
+  --shell-ink-dim: #756b82;
+  --lcd: #fdfbf2;
+  --lcd-hi: #ffffff;
+  --lcd-ink: #3b3340;
+  --lcd-dim: #8b8394;
+  --header-bg: #ece2f4;
+  --header-ink: #3b3340;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --r-card: 13px;
   --r-inset: 10px;
 }
+/* system dark (nothing stamped) — an explicit light choice still wins */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --page: #211f22;
     --surface: #2d2a2e;
@@ -56,15 +60,48 @@
     --warning: #ffd866;
     --critical: #ff6188;
     --accent: #fc9867;
+    --accent-ink: #2b1a10;
     --shadow-card: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.28);
     --shadow-modal: 0 24px 70px rgba(0,0,0,0.6), 0 4px 16px rgba(0,0,0,0.4);
     --dot: rgba(252, 252, 250, 0.045);
     --shell: #353238;
     --shell-edge: #141215;
+    --shell-ink: #fcfcfa;
+    --shell-ink-dim: #a8a5a0;
     --lcd: #f4efdd;
     --lcd-hi: #fbf7ea;
     --header-bg: #262327;
+    --header-ink: #fcfcfa;
   }
+}
+/* explicit dark choice, even on a light OS */
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #211f22;
+    --surface: #2d2a2e;
+    --surface-2: #363338;
+    --surface-3: #423f45;
+    --ink: #fcfcfa;
+    --ink-2: #c1bec3;
+    --muted: #8b888d;
+    --hairline: #38353a;
+    --border: rgba(252, 252, 250, 0.12);
+    --good: #a9dc76;
+    --warning: #ffd866;
+    --critical: #ff6188;
+    --accent: #fc9867;
+    --accent-ink: #2b1a10;
+    --shadow-card: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.28);
+    --shadow-modal: 0 24px 70px rgba(0,0,0,0.6), 0 4px 16px rgba(0,0,0,0.4);
+    --dot: rgba(252, 252, 250, 0.045);
+    --shell: #353238;
+    --shell-edge: #141215;
+    --shell-ink: #fcfcfa;
+    --shell-ink-dim: #a8a5a0;
+    --lcd: #f4efdd;
+    --lcd-hi: #fbf7ea;
+    --header-bg: #262327;
+    --header-ink: #fcfcfa;
 }
 
 * { box-sizing: border-box; }
@@ -117,7 +154,7 @@ h1::before { content: ""; }
 .stat.needs_input { background: #ffdce6; }
 .new-agent-btn {
   font: 700 12px var(--mono);
-  color: #fff6ec;
+  color: var(--accent-ink);
   background: var(--accent);
   border: 2px solid var(--shell-edge);
   border-radius: 9px;
@@ -516,9 +553,10 @@ main {
 .composer-note { color: var(--muted); font-size: 12.5px; }
 .composer-input {
   flex: 1;
-  resize: none;
-  min-height: 36px;
-  max-height: 120px;
+  resize: vertical;          /* drag the corner to grow the reply box */
+  min-height: 56px;
+  max-height: 65vh;
+  height: 84px;
   padding: 8px 12px;
   font: 13.5px/1.4 var(--sans);
   color: var(--ink);
@@ -747,12 +785,47 @@ main {
 }
 button.model-tag { cursor: pointer; }
 button.model-tag:hover { background: var(--lcd); }
-.model-pick {
-  font: 700 10px var(--mono);
-  background: var(--lcd-hi); color: var(--lcd-ink);
-  border: 1.5px solid var(--shell-edge); border-radius: 6px;
-  padding: 1px 3px; flex-shrink: 0;
+/* model chooser: a real popup, not a native select element (whose
+   blur-on-open quirk closed it before it could be used) */
+.model-menu {
+  position: absolute; right: 14px; top: 40px; z-index: 20;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 4px;
+  background: var(--lcd-hi);
+  border: 2px solid var(--shell-edge);
+  border-radius: 8px;
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--ink) 25%, transparent);
 }
+.model-menu button {
+  font: 800 10px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+  color: var(--lcd-ink); background: none;
+  border: none; border-radius: 5px; padding: 5px 12px; cursor: pointer;
+  text-align: left;
+}
+.model-menu button:hover { background: var(--surface-3); }
+
+/* theme switch */
+.theme-btn {
+  font: 700 13px var(--mono); line-height: 1;
+  color: var(--header-ink);
+  background: color-mix(in srgb, var(--header-ink) 12%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--header-ink) 30%, transparent);
+  border-radius: 8px; padding: 6px 10px; cursor: pointer;
+}
+.theme-btn:hover { background: color-mix(in srgb, var(--header-ink) 22%, transparent); }
+
+/* transient feedback for fire-and-forget actions (model switch, …) */
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  z-index: 60; max-width: min(620px, 92vw);
+  font: 600 12px var(--mono);
+  color: var(--shell-ink); background: var(--shell);
+  border: 2px solid var(--shell-edge); border-radius: 9px;
+  padding: 9px 14px;
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--ink) 30%, transparent);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.toast.err { border-color: var(--critical); }
 .new-pip {
   font: 800 8.5px var(--mono); text-transform: uppercase; letter-spacing: .08em;
   background: #ff6188; color: #fff;
