@@ -43,6 +43,15 @@ function esc(s) {
     ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 }
 
+/* True while you're mid-selection inside `el`. The 1s poll re-renders whole
+   subtrees, which silently destroys a selection in progress — so anything that
+   replaces innerHTML checks this first and just waits a tick instead. */
+function hasSelectionIn(el) {
+  const sel = typeof getSelection === "function" ? getSelection() : null;
+  if (!el || !sel || !sel.rangeCount || sel.isCollapsed) return false;
+  return el.contains(sel.getRangeAt(0).commonAncestorContainer);
+}
+
 function ago(ts) {
   if (!ts) return "–";
   const ms = ts > 1e12 ? ts : ts * 1000;
@@ -80,7 +89,7 @@ function fmtDuration(ts) {
 
 /* ---------- pixel mascot (a little Tamagotchi Claude per session) ----------
    Every visual axis encodes something: colour = model, hat = git repo,
-   held item = directory, and the eyes/zzz follow the live state. */
+   held item = git branch, and the eyes/zzz follow the live state. */
 
 /* Monokai-pastel skins; "other" keeps the authentic clay Claude. */
 const MODEL_SKIN = {
@@ -111,24 +120,69 @@ function hashStr(s) {
 }
 
 /* Three independent axes, so a pet's look tells you where it lives:
-     body colour = model   ·   HAT = git repo   ·   HELD ITEM = directory
-   Two agents in one repo wear the same hat; if they sit in different
-   subfolders they carry different items. Same repo AND folder = twins.
-   The device tint follows the repo too, so repo-mates read as a family. */
-const HAT_NAMES = ["crown", "helm", "hennin", "wizard", "halo", "flowers", "horns", "bow"];
+     body colour = model   ·   HAT = git repo   ·   HELD ITEM = git branch
+   Agents in one repo wear the same hat; agents on one branch carry the same
+   item, so a shared branch reads across repos too (everyone on `main` holds
+   the same thing). Same repo AND branch = twins. Outside a git repo there is
+   no repo or branch to key on, so both axes fall back to the directory — which
+   keeps the promise that the same working dir looks the same.
+   The device tint follows the hat, so repo-mates read as a family. */
+const HAT_NAMES = ["crown", "helm", "hennin", "wizard", "halo", "flowers", "horns", "bow",
+                   "cap", "beanie", "tophat", "antenna", "laurel", "chef", "headphones", "mohawk"];
 const ITEM_NAMES = ["sword", "shield", "wand", "staff", "book", "lantern", "potion", "banner"];
 const ACCENTS = ["#ffd866", "#ff6188", "#78dce8", "#ab9df2", "#fc9867", "#a9dc76", "#8fb8ff", "#ffa7c4"];
+
+const hatKeyOf = a => a.git?.repo ? "repo:" + a.git.repo
+                                  : "dir:" + (a.cwd || a.sessionId || "");
+const itemKeyOf = a => a.git?.branch ? "branch:" + a.git.branch
+                                     : "dir:" + (a.cwd || a.sessionId || "");
+
+/* Hashing a key straight onto a sprite collides far more than intuition says:
+   8 repos dropped into 8 hats have only a 0.2% chance of all coming out
+   different (birthday paradox), so shared hats were the norm, not bad luck.
+   The hash therefore only picks a *preferred* slot — a repo that wants one
+   already taken probes forward to the next free sprite. That makes outfits
+   genuinely distinct whenever the board holds no more repos (or branches) than
+   there are sprites. Keys are assigned in sorted order so the result depends
+   only on which agents are on the board, never on their arrival order. */
+function assignSlots(keys, names) {
+  const taken = new Array(names.length).fill(null);
+  const out = {};
+  for (const key of [...new Set(keys)].sort()) {
+    let i = hashStr(key) % names.length;  // preferred slot
+    for (let n = 0; n < names.length && taken[i] !== null; n++) i = (i + 1) % names.length;
+    taken[i] = key;  // past `names.length` distinct keys, sharing is unavoidable
+    out[key] = names[i];
+  }
+  return out;
+}
+
+/* Recomputed only when the set of repos/branches on the board changes. */
+let _outfits = {key: null, hats: {}, items: {}, accents: {}};
+
+function outfitMap() {
+  const hatKeys = agents.map(hatKeyOf);
+  const itemKeys = agents.map(itemKeyOf);
+  const key = JSON.stringify([hatKeys, itemKeys]);
+  if (_outfits.key !== key) {
+    _outfits = {key, hats: assignSlots(hatKeys, HAT_NAMES),
+                items: assignSlots(itemKeys, ITEM_NAMES),
+                accents: assignSlots(hatKeys, ACCENTS)};
+  }
+  return _outfits;
+}
 
 function critterOf(a) {
   const model = (a.context_breakdown || {}).model;
   const skin = MODEL_SKIN[modelFamily(model)];
-  const dir = a.cwd || a.sessionId || "";
-  const rh = hashStr(a.git?.repo ? "repo:" + a.git.repo : "dir:" + dir);
-  const dh = hashStr("dir:" + dir);
+  const hk = hatKeyOf(a), ik = itemKeyOf(a);
+  const {hats, items, accents} = outfitMap();
+  // The fallbacks cover pets that aren't on the board (the brand mark).
+  const rh = hashStr(hk);
   return {skin,
-          hat: HAT_NAMES[rh % HAT_NAMES.length],
-          item: ITEM_NAMES[dh % ITEM_NAMES.length],
-          accent: ACCENTS[(rh >>> 5) % ACCENTS.length]};  // >>> : >> goes negative past 2^31
+          hat: hats[hk] || HAT_NAMES[rh % HAT_NAMES.length],
+          item: items[ik] || ITEM_NAMES[hashStr(ik) % ITEM_NAMES.length],
+          accent: accents[hk] || ACCENTS[(rh >>> 5) % ACCENTS.length]};  // >>> : >> goes negative past 2^31
 }
 
 /* The pet IS the Claude Code creature: one big rectangle, two little arm nubs
@@ -184,6 +238,32 @@ const HAT = {
             [6,2,"A"],[9,2,"W"],[12,2,"A"]],
   horns:   [[3,1,"W"],[4,2,"W"],[4,3,"W"],[14,1,"W"],[13,2,"W"],[13,3,"W"]],
   bow:     [[7,1,"A"],[7,2,"A"],[10,1,"A"],[10,2,"A"],[8,2,"G"],[9,2,"G"],[8,3,"A"],[9,3,"A"]],
+  cap:     [[6,2,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
+            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],
+            [12,3,"W"],[13,3,"W"],[14,3,"W"]],                    // dome + brim
+  beanie:  [[8,1,"W"],[9,1,"W"],                                  // bobble, sat on the dome
+            [6,2,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
+            [5,3,"W"],[6,3,"W"],[7,3,"W"],[8,3,"W"],[9,3,"W"],[10,3,"W"],[11,3,"W"],[12,3,"W"]],
+  tophat:  [[6,0,"A"],[7,0,"A"],[8,0,"A"],[9,0,"A"],[10,0,"A"],[11,0,"A"],
+            [6,1,"A"],[7,1,"A"],[8,1,"A"],[9,1,"A"],[10,1,"A"],[11,1,"A"],
+            [6,2,"G"],[7,2,"G"],[8,2,"G"],[9,2,"G"],[10,2,"G"],[11,2,"G"],   // band
+            [4,3,"A"],[5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],
+            [10,3,"A"],[11,3,"A"],[12,3,"A"],[13,3,"A"]],
+  antenna: [[5,0,"G"],[12,0,"G"],[5,1,"S"],[12,1,"S"],[6,2,"S"],[11,2,"S"],
+            [7,3,"S"],[8,3,"S"],[9,3,"S"],[10,3,"S"]],            // bulbs on stalks
+  laurel:  [[3,3,"A"],[4,2,"A"],[5,1,"A"],[6,1,"A"],
+            [14,3,"A"],[13,2,"A"],[12,1,"A"],[11,1,"A"],
+            [8,1,"G"],[9,1,"G"]],                                 // wreath + gem
+  chef:    [[6,0,"W"],[7,0,"W"],[9,0,"W"],[10,0,"W"],             // puffs
+            [6,1,"W"],[7,1,"W"],[8,1,"W"],[9,1,"W"],[10,1,"W"],[11,1,"W"],
+            [6,2,"W"],[7,2,"W"],[8,2,"W"],[9,2,"W"],[10,2,"W"],[11,2,"W"],
+            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"]],
+  headphones: [[4,1,"S"],[5,1,"S"],[6,1,"S"],[7,1,"S"],[8,1,"S"],[9,1,"S"],
+            [10,1,"S"],[11,1,"S"],[12,1,"S"],[13,1,"S"],          // band
+            [3,2,"S"],[3,3,"A"],[14,2,"S"],[14,3,"A"]],           // ear cups
+  mohawk:  [[6,1,"A"],[8,1,"A"],[10,1,"A"],                       // spikes, not a cone
+            [6,2,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
+            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"]],
 };
 
 const ITEM = {
@@ -226,7 +306,7 @@ function mascotSvg(a, cls = "") {
 }
 
 function legendHtml() {
-  return `<div class="legend" title="Pet colour = model · hat = git repo · held item = folder. Egg = no reply yet, so the model is unknown.">
+  return `<div class="legend" title="Pet colour = model · hat = git repo (or folder, outside a repo) · held item = git branch. Egg = no reply yet, so the model is unknown.">
     ${MODEL_ORDER.map(k => `<span class="legend-item">
       <span class="legend-dot" style="background:${MODEL_SKIN[k].body}"></span>${MODEL_SKIN[k].label}</span>`).join("")}
   </div>`;
@@ -407,11 +487,13 @@ function summaryLine(a) {
 
 const STATE_ICON = {needs_input: "⚠", waiting: "⏸", busy: "●", idle: "○"};
 
-// Only the modes reachable via Shift+Tab cycling (Bypass is a separate opt-in).
 const MODE_LABEL = {default: "Manual", acceptEdits: "Auto-edit", plan: "Plan",
                     auto: "Auto", bypassPermissions: "Bypass"};
 const MODE_SHORT = {default: "manual", acceptEdits: "auto-edit", plan: "plan",
                     auto: "auto", bypassPermissions: "bypass"};
+// The modes ⇧⇥ cycles through — the ones we can offer to switch to. Bypass is a
+// separate opt-in with its own confirmation, so it is displayed but never set.
+const MODE_CYCLE = ["default", "acceptEdits", "plan", "auto"];
 
 function keyBtn(target, key, label, cls) {
   return `<button class="key-btn ${cls}" data-target="${esc(target)}" data-key="${esc(key)}">${label}</button>`;
@@ -446,9 +528,16 @@ function approvalActionsHtml(a) {
 
 function modeSelectorHtml(a) {
   if (!a.permission_mode) return "";
-  return `<div class="section"><div class="section-title">Permission mode</div>
-    <div class="mode-current">${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}
-      <span class="mode-hint">change it in the session with ⇧⇥</span></div></div>`;
+  const cur = a.permission_mode;
+  const btns = MODE_CYCLE.map(id => `<button class="mode-btn${id === cur ? " active" : ""}"
+      data-target="${esc(a.tmux ? a.tmux.target : "")}" data-mode="${esc(id)}"
+      ${a.tmux ? "" : "disabled"}>${esc(MODE_LABEL[id])}</button>`).join("");
+  return `<div class="section"><div class="section-title">Permission mode
+      ${MODE_CYCLE.includes(cur) ? "" : `<span class="when">${esc(MODE_LABEL[cur] || cur)}</span>`}</div>
+    <div class="mode-row">${btns}</div>
+    <div class="mode-hint">${a.tmux
+      ? "Presses ⇧⇥ in the session until its footer reports the mode you picked."
+      : "No tmux pane — the mode can't be changed from here."}</div></div>`;
 }
 
 function fmtTokens(n) {
@@ -549,6 +638,7 @@ function cardHtml(a) {
         <span class="state-ico ${esc(a.state)}" title="${STATE_LABEL[a.state] || ""}">${STATE_ICON[a.state] || "○"}</span>
         <span class="agent-name" title="${esc(a.name)} — click to open, rename inside">${esc(a.display_name || a.name)}</span>
         ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
+        ${drafts[a.sessionId] ? `<span class="draft-pip" title="Unsent message waiting here: ${esc(drafts[a.sessionId].slice(0, 120))}">draft</span>` : ""}
         ${a.tmux ? `<button class="model-tag" data-target="${esc(a.tmux.target)}"
            title="Model (the pet's colour) — click to switch model">${esc(model.label)}</button>`
          : `<span class="model-tag" title="Model — the pet's colour">${esc(model.label)}</span>`}
@@ -577,9 +667,12 @@ function cardHtml(a) {
         <b>born</b> ${ago(a.startedAt)} <span class="sid">#${esc((a.sessionId || "").slice(0, 8))}</span></div>
     </div>
     <div class="tama-foot">
-      ${a.permission_mode ? `<span class="mode-chip" title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>` : ""}
-      ${a.tmux ? `<button class="tmux-btn" data-target="${esc(a.tmux.target)}"
-         title="tmux ${esc(a.tmux.target)} = session:window.pane — click to jump your terminal here">${esc(a.tmux.target)}</button>` : ""}
+      ${a.permission_mode ? (a.tmux
+        ? `<button class="mode-chip" data-target="${esc(a.tmux.target)}"
+             title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)} — click to change">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</button>`
+        : `<span class="mode-chip" title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>`) : ""}
+      ${a.tmux ? `<span class="tmux-tag"
+         title="Lives in tmux ${esc(a.tmux.target)} = session:window.pane">${esc(a.tmux.target)}</span>` : ""}
       <span class="time" title="Last activity">${ago(a.transcript_mtime)}</span>
     </div>
   </div>`;
@@ -594,7 +687,8 @@ let lastChatKey = "";
 const TABS = [
   {id: "overview", label: "Overview", show: () => true},
   {id: "graph", label: "Work graph", show: a => !!agentGraph(a)},
-  {id: "exchange", label: "Exchange", show: a => a.last_prompt || a.last_assistant},
+  {id: "exchange", label: "Exchange",
+   show: a => a.last_prompt || a.last_assistant || a.state === "needs_input"},
   {id: "artifacts", label: "Artifacts", show: () => true},
 ];
 
@@ -785,14 +879,34 @@ function renderChatEntries(a, msgs) {
   }).join("");
 }
 
+/* The permission dialog the pane is showing, as the last entry in the
+   conversation. It used to live only on the card and in Overview, so the
+   Exchange read as though the agent had simply gone quiet mid-turn. */
+function approvalPromptHtml(a) {
+  if (a.state !== "needs_input") return "";
+  const p = a.pending_tool;
+  const q = (a.prompt && a.prompt.question) || a.notification || "Needs your approval";
+  return `<div class="msg approval">
+    <div class="msg-meta">⚠ waiting on you</div>
+    <div class="msg-text">
+      <div class="approve-q">${esc(q)}</div>
+      ${p ? `<div class="approve-detail"><span class="tool-name">${esc(p.name)}</span>${
+        p.detail ? `<pre class="tool-cmd">${esc(p.detail)}</pre>` : ""}</div>` : ""}
+      ${approvalActionsHtml(a)}
+    </div>
+  </div>`;
+}
+
 function exchangeTab(a) {
   if (chat.sid !== a.sessionId || !chat.messages) {
     return `<div class="section"><div class="chat-loading">Loading conversation…</div></div>`;
   }
-  if (!chat.messages.length) {
+  const approval = approvalPromptHtml(a);
+  if (!chat.messages.length && !approval) {
     return `<div class="section"><div class="chat-loading">No conversation found in the transcript tail.</div></div>`;
   }
-  return `<div class="section"><div class="chat">${renderChatEntries(a, withPending(a, chat.messages))}</div></div>`;
+  return `<div class="section"><div class="chat">${
+    renderChatEntries(a, withPending(a, chat.messages))}${approval}</div></div>`;
 }
 
 /* ---------- artifacts: any .md/.txt files or folders you pin ---------- */
@@ -862,7 +976,7 @@ function modalHeadHtml(a) {
     </span>
     <span class="model-tag" style="color:${model.outline}" title="Model — mascot colour">${esc(model.label)}</span>
     <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
-    ${a.tmux ? `<button class="tmux-btn" data-target="${esc(a.tmux.target)}" title="tmux ${esc(a.tmux.target)} — click to focus">${esc(a.tmux.target)}</button>` : ""}
+    ${a.tmux ? `<span class="tmux-tag" title="Lives in tmux ${esc(a.tmux.target)}">${esc(a.tmux.target)}</span>` : ""}
     <button class="kill-btn" data-sid="${esc(a.sessionId)}" title="Terminate this agent">Kill</button>
     <button class="modal-close" title="Close (Esc)">✕</button>`;
 }
@@ -942,6 +1056,19 @@ function flashStatus(ok) {
   setTimeout(() => { el.textContent = ""; }, 2000);
 }
 
+/* Unsent composer text, kept per session so closing a card to go look at
+   another pet — or reloading the page — doesn't throw away a half-written
+   message. Cleared once the message is actually sent. */
+let drafts = {};
+try { drafts = JSON.parse(localStorage.tamaDrafts || "{}"); } catch { /* fresh */ }
+
+function setDraft(sid, text) {
+  if (!sid) return;
+  if (text.trim()) drafts[sid] = text;
+  else delete drafts[sid];
+  try { localStorage.tamaDrafts = JSON.stringify(drafts); } catch { /* private mode */ }
+}
+
 /* Your message, shown immediately; cleared once the transcript catches up
    (Claude Code writes the turn to disk a beat after we paste it). */
 let pending = null;  // {sid, text, ts}
@@ -958,11 +1085,18 @@ async function sendMessage() {
   if (!a?.tmux || !input || !input.value.trim()) return;
   const text = input.value;
   input.value = "";
+  setDraft(a.sessionId, "");  // it's on its way out; stop remembering it
   pending = {sid: a.sessionId, text, ts: Date.now()};
   renderModal();
   const r = await post("/api/send", {target: a.tmux.target, text});
   flashStatus(r.ok);
-  if (!r.ok) { pending = null; renderModal(); return; }
+  if (!r.ok) {  // nothing was delivered — hand the text back rather than lose it
+    pending = null;
+    setDraft(a.sessionId, text);
+    if (!input.value.trim()) input.value = text;
+    renderModal();
+    return;
+  }
   loadChat(a.sessionId);                                   // catch it early
   setTimeout(() => loadChat(a.sessionId), 900);            // and once it lands
 }
@@ -976,6 +1110,8 @@ async function stopAgent() {
 function wireComposer() {
   const input = modal.querySelector(".composer-input");
   if (!input) return;
+  input.value = drafts[openSid] || "";  // whatever you were part-way through
+  input.addEventListener("input", () => setDraft(openSid, input.value));
   // remember however tall you dragged the reply box
   try { if (localStorage.tamaComposerH) input.style.height = localStorage.tamaComposerH; }
   catch { /* private mode */ }
@@ -1027,11 +1163,18 @@ function renderModal() {
   const body = modal.querySelector(".modal-body");
   if (body.contains(document.activeElement) &&
       document.activeElement.classList.contains("art-add")) return;  // mid-typing
+  if (hasSelectionIn(body)) return;  // don't yank the text out from under a selection
   const scroll = activeTab === lastRenderedTab ? body.scrollTop : 0;
   body.innerHTML = modalHtml(a);
   const msgs = chat.messages || [];
+  // Tool entries carry no .text — reading it unguarded threw here, which
+  // aborted the render before the scroll-to-bottom below. That is why opening
+  // an agent stuck on a tool/approval left you at the top of the conversation.
+  const last = msgs[msgs.length - 1];
+  // The approval block is part of the exchange, so it counts as "new content"
+  // to scroll to when it appears.
   const chatKey = activeTab === "exchange"
-    ? `${msgs.length}:${msgs[msgs.length - 1]?.text.length || 0}` : "";
+    ? `${msgs.length}:${last?.role}:${last?.text?.length || 0}:${a.state}` : "";
   if (activeTab === "exchange" && (lastRenderedTab !== "exchange" || chatKey !== lastChatKey)) {
     body.scrollTop = body.scrollHeight;  // pin chat to the latest message
   } else {
@@ -1075,20 +1218,23 @@ function render() {
     .filter(([, n]) => n)
     .map(([s, n]) => `<span class="stat ${s}"><span class="dot ${s}"></span><b>${n}</b> ${STATE_LABEL[s]}</span>`)
     .join("");
-  if (grid.querySelector(".model-menu")) return;  // don't yank an open picker
-  grid.innerHTML = agents.length
-    ? GROUPS.map(g => {
-        const list = agents.filter(a => g.states.includes(a.state));
-        if (!list.length) return "";
-        if (g.id === "idle" || g.id === "waiting")  // most recent reply first
-          list.sort((x, y) => (y.transcript_mtime || 0) - (x.transcript_mtime || 0));
-        return `<div class="group-head ${g.id}">
-            <span class="group-label">${g.label}</span>
-            <span class="group-count">${list.length}</span>
-            <span class="group-rule"></span>
-          </div>` + list.map(cardHtml).join("");
-      }).join("")
-    : `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`;
+  // Don't yank an open picker, or text you're in the middle of selecting.
+  // Everything outside the grid still refreshes.
+  if (!grid.querySelector(".model-menu") && !hasSelectionIn(grid)) {
+    grid.innerHTML = agents.length
+      ? GROUPS.map(g => {
+          const list = agents.filter(a => g.states.includes(a.state));
+          if (!list.length) return "";
+          if (g.id === "idle" || g.id === "waiting")  // most recent reply first
+            list.sort((x, y) => (y.transcript_mtime || 0) - (x.transcript_mtime || 0));
+          return `<div class="group-head ${g.id}">
+              <span class="group-label">${g.label}</span>
+              <span class="group-count">${list.length}</span>
+              <span class="group-rule"></span>
+            </div>` + list.map(cardHtml).join("");
+        }).join("")
+      : `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`;
+  }
   document.title = agents.some(a => a.state === "needs_input")
     ? "⚠ TamaClaudchi" : "TamaClaudchi";
   if (openSid) renderModal();
@@ -1121,31 +1267,47 @@ document.querySelector(".brand-mark").innerHTML =
   mascotSvg({state: "busy", sessionId: "brand", cwd: "/D1",
              git: {repo: "R5"}, context_breakdown: {model: "clay"}});
 
-function focusTmux(target) {
-  post("/api/focus", {target});
-}
-
-/* Click the model pill → pick a model → the server types `/model <id>` into
-   that session. The pill (and pet colour) update after the next reply. */
+/* Click the model pill or the mode chip → pick from a popup → the server drives
+   the change inside that session. Both axes share one menu; they differ only in
+   the choices they offer and what applying one does. */
 const MODEL_IDS = {Fable: "claude-fable-5", Opus: "claude-opus-5",
                    Sonnet: "claude-sonnet-5", Haiku: "claude-haiku-4-5"};
 
-function openModelPick(btn) {
+async function setModel(target, model) {
+  const r = await post("/api/model", {target, model});
+  toast(r.ok ? `Sent /model ${model}. The pill updates after the next reply.\n${r.msg}`
+             : `Model switch failed: ${r.msg}`, !r.ok);
+}
+
+async function setMode(target, mode) {
+  const r = await post("/api/mode", {target, mode});
+  toast(r.ok ? `Permission mode is now ${MODE_LABEL[mode] || mode}.`
+             : `Mode switch failed: ${r.msg}`, !r.ok);
+  tick();  // the chip reads back from the pane, so refresh it now
+}
+
+const PICKERS = {
+  model: {items: () => Object.entries(MODEL_IDS), apply: setModel},
+  mode:  {items: () => MODE_CYCLE.map(id => [MODE_LABEL[id], id]), apply: setMode,
+          foot: true},  // the mode chip lives at the bottom of the card
+};
+
+function openPickMenu(btn, kind) {
+  const spec = PICKERS[kind];
   document.querySelectorAll(".model-menu").forEach(m => m.remove());
   const menu = document.createElement("div");
-  menu.className = "model-menu";
-  menu.innerHTML = Object.entries(MODEL_IDS)
-    .map(([label, id]) => `<button data-model="${esc(id)}">${esc(label)}</button>`).join("");
+  menu.className = "model-menu" + (spec.foot ? " at-foot" : "");
+  menu.innerHTML = spec.items()
+    .map(([label, id]) => `<button data-pick="${esc(id)}">${esc(label)}</button>`).join("");
   btn.closest(".card").appendChild(menu);
   menu.addEventListener("click", async e => {
     e.stopPropagation();
-    const b = e.target.closest("button[data-model]");
+    const b = e.target.closest("button[data-pick]");
     if (!b) return;
     b.textContent = "…";
-    const r = await post("/api/model", {target: btn.dataset.target, model: b.dataset.model});
+    const pick = b.dataset.pick;
     menu.remove();
-    toast(r.ok ? `Sent /model ${b.dataset.model}. The pill updates after the next reply.\n${r.msg}`
-               : `Model switch failed: ${r.msg}`, !r.ok);
+    await spec.apply(btn.dataset.target, pick);
   });
   // close on the next outside click (deferred so this very click doesn't count)
   setTimeout(() => document.addEventListener("click",
@@ -1173,12 +1335,6 @@ async function killAgent(btn) {
 }
 
 document.body.addEventListener("click", e => {
-  const btn = e.target.closest(".tmux-btn");
-  if (btn) {
-    e.stopPropagation();
-    focusTmux(btn.dataset.target);
-    return;
-  }
   const kb = e.target.closest(".key-btn");
   if (kb) {
     e.stopPropagation();
@@ -1219,7 +1375,20 @@ document.body.addEventListener("click", e => {
   const mp = e.target.closest(".model-tag");
   if (mp && mp.dataset.target) {
     e.stopPropagation();
-    openModelPick(mp);
+    openPickMenu(mp, "model");
+    return;
+  }
+  const mc = e.target.closest(".mode-chip");
+  if (mc && mc.dataset.target) {
+    e.stopPropagation();
+    openPickMenu(mc, "mode");
+    return;
+  }
+  const mb = e.target.closest(".mode-btn");
+  if (mb && !mb.disabled) {
+    e.stopPropagation();
+    mb.textContent = "…";
+    setMode(mb.dataset.target, mb.dataset.mode);
     return;
   }
   if (e.target.closest(".modal-close") || e.target === overlay) {
@@ -1234,8 +1403,21 @@ document.body.addEventListener("click", e => {
     renderModal();
     return;
   }
+  // A drag that ends on a card is a text selection, not a click on the card.
   const card = e.target.closest(".card");
-  if (card) openModal(card.dataset.sid);
+  if (card && !hasSelectionIn(card)) openModal(card.dataset.sid);
+});
+
+/* Double-click a command or a code block to select exactly it — dragging across
+   a chat bubble picks up the surrounding prose and the message metadata. */
+document.body.addEventListener("dblclick", e => {
+  const block = e.target.closest(".tool-cmd, .codeblock, .tool-call-detail");
+  if (!block) return;
+  const range = document.createRange();
+  range.selectNodeContents(block);
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
 });
 
 async function pinArtifact() {
@@ -1338,6 +1520,12 @@ async function tick() {
       const live = new Set(agents.map(a => a.sessionId));
       seen = Object.fromEntries(Object.entries(seen).filter(([k]) => live.has(k)));
       saveSeen();
+    }
+    if (Object.keys(drafts).length > 50) {  // same, for drafts of dead sessions
+      const live = new Set(agents.map(a => a.sessionId));
+      drafts = Object.fromEntries(Object.entries(drafts)
+        .filter(([k]) => live.has(k) || k === openSid));
+      try { localStorage.tamaDrafts = JSON.stringify(drafts); } catch { /* private */ }
     }
     const key = JSON.stringify(agents) + openSid;
     if (key !== lastPayload) {

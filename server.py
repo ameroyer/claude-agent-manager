@@ -995,6 +995,43 @@ def set_model(target, model):
     return True, " | ".join(tail[-2:]) if tail else "sent"
 
 
+# Permission modes reachable by cycling Shift+Tab inside the session. Bypass is
+# a deliberate opt-in with its own confirmation dialog, so it isn't offered here.
+CYCLE_MODES = ("default", "acceptEdits", "plan", "auto")
+
+
+def set_mode(target, mode):
+    """Switch a session's permission mode by pressing Shift+Tab until its own
+    footer reports the mode you asked for.
+
+    The footer is the ground truth: the cycle order and which modes are even in
+    the cycle vary by version and config, so this presses and re-reads rather
+    than counting steps. Refuses while an approval dialog is up, where Shift+Tab
+    means something else, and gives up (rather than spinning) if a full lap
+    doesn't land on the target."""
+    if mode not in CYCLE_MODES:  # cheap allowlist first, and a truthful error
+        return False, "unknown mode"
+    if not valid_pane(target):
+        return False, "unknown pane"
+    st = pane_status(target)
+    if st["prompt"]:
+        return False, "answer the approval prompt first"
+    if not st["mode"]:
+        return False, "can't read the permission mode from the pane"
+    for _ in range(len(CYCLE_MODES) + 1):
+        if st["mode"] == mode:
+            _cache["t"] = 0.0  # reflect the new mode on the next poll
+            return True, mode
+        try:
+            subprocess.run(["tmux", "send-keys", "-t", target, "BTab"],
+                           timeout=5, check=True)
+        except Exception as e:
+            return False, str(e)
+        time.sleep(0.35)  # let the CLI redraw its footer before we re-read it
+        st = pane_status(target)
+    return False, f"mode not in this session's cycle (stopped at {st['mode']})"
+
+
 ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "4", "y", "n"}
 
 
@@ -1105,26 +1142,6 @@ def spawn_session(cwd, prompt, name=None, resume=None):
     return True, name
 
 
-def focus_pane(target):
-    """Jump the most recently active tmux client to the given pane."""
-    if not re.fullmatch(r"[\w.-]+:\d+\.\d+", target):
-        return False, "bad target"
-    clients = run(["tmux", "list-clients", "-F", "#{client_name}\t#{client_activity}"])
-    best = None
-    for line in clients.splitlines():
-        parts = line.split("\t")
-        if len(parts) == 2:
-            if best is None or int(parts[1]) > best[1]:
-                best = (parts[0], int(parts[1]))
-    if not best:
-        return False, "no attached tmux client"
-    sess = target.split(":")[0]
-    run(["tmux", "switch-client", "-c", best[0], "-t", sess])
-    run(["tmux", "select-window", "-t", target.rsplit(".", 1)[0]])
-    run(["tmux", "select-pane", "-t", target])
-    return True, "ok"
-
-
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -1205,8 +1222,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             self._send(401, {"error": "unauthorized"})
             return
-        actions = {"/api/focus": lambda b: focus_pane(b.get("target", "")),
-                   "/api/send": lambda b: send_text(b.get("target", ""),
+        actions = {"/api/send": lambda b: send_text(b.get("target", ""),
                                                     b.get("text", "")),
                    "/api/key": lambda b: send_key(b.get("target", ""),
                                                   b.get("key", "")),
@@ -1215,6 +1231,8 @@ class Handler(BaseHTTPRequestHandler):
                                                      b.get("name", "")),
                    "/api/model": lambda b: set_model(b.get("target", ""),
                                                      b.get("model", "")),
+                   "/api/mode": lambda b: set_mode(b.get("target", ""),
+                                                   b.get("mode", "")),
                    "/api/artifact-pin": lambda b: pin_artifact(
                        b.get("sid", ""), b.get("path", ""), b.get("remove", False)),
                    "/api/spawn": lambda b: spawn_session(b.get("cwd", ""),

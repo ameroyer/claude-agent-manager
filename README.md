@@ -9,7 +9,7 @@ Each pet's look encodes where it lives, so you can read the fleet at a glance:
 |---|---|
 | body colour | the model (Fable / Opus / Sonnet / Haiku) |
 | hat | the git repo — repo-mates wear the same hat and share the device tint |
-| held item | the directory — same repo, different folder = different item |
+| held item | the git branch — everyone on `main` holds the same thing |
 | an egg instead of a pet | the session hasn't replied yet, so its model is unknown |
 
 The mood pill, the pet's eyes and the three device lights track what the agent
@@ -92,7 +92,13 @@ you restart them.
   `tasks/todo.md`.
 - Approve or deny a permission prompt right from the card — it shows what's
   being requested (e.g. `Bash: rm -rf …`).
-- Type a message to an agent and it lands in that pane.
+- Type a message to an agent and it lands in that pane. A half-written message
+  is kept per session, so you can go look at another pet (or reload) and come
+  back to it — cards with unsent text show a `draft` pill.
+- Switch a session's model (the pet's colour) or its permission mode — manual,
+  auto-edit, plan, auto — from the card or the Overview tab. The mode switch
+  presses ⇧⇥ in the session until its own footer reports the mode you picked, so
+  what you see is what the CLI actually did. Bypass is left as a manual opt-in.
 - Spawn a new agent (pick a folder + optional first message), resume a past
   conversation from that folder (`claude --resume`), or kill one.
 - If a session ever fails to show up on the board, open `/api/debug?token=…` —

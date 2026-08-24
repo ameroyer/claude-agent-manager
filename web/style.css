@@ -271,15 +271,35 @@ main {
 .key-btn.no { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
 .key-btn.ok:hover, .key-btn.no:hover, .key-btn.alt:hover { filter: brightness(1.1); }
 
-/* permission-mode (read-only display) */
-.mode-current {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  font: 650 13.5px var(--sans);
-  color: var(--ink);
+/* permission-mode picker: a segmented control, current mode highlighted */
+.mode-row { display: flex; gap: 7px; flex-wrap: wrap; }
+.mode-btn {
+  font: 650 12px var(--sans);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  transition: filter .12s ease, background .12s ease;
 }
-.mode-hint { font: 11.5px var(--mono); color: var(--muted); font-weight: 400; }
+.mode-btn:hover:not(:disabled) { filter: brightness(1.08); color: var(--ink); }
+.mode-btn:disabled { cursor: default; opacity: .5; }
+.mode-btn.active {
+  background: var(--accent); border-color: var(--accent);
+  color: #fff; cursor: default;
+}
+.mode-hint { margin-top: 8px; font: 11.5px var(--mono); color: var(--muted); font-weight: 400; }
+
+/* approval, shown as the last entry of the conversation */
+.msg.approval { align-self: flex-start; max-width: 92%; }
+.msg.approval .msg-meta { color: var(--critical); }
+.msg.approval .msg-text {
+  background: var(--surface-2);
+  border: 1px solid color-mix(in srgb, var(--critical) 45%, var(--border));
+  border-bottom-left-radius: 4px;
+}
+.approve-q { font: 650 13px var(--sans); color: var(--ink); }
 
 /* context meter */
 .ctx { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
@@ -332,7 +352,8 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tmux-btn {
+/* where the agent lives — a label, not a control */
+.tmux-tag {
   margin-left: auto;
   font: 11.5px var(--mono);
   color: var(--ink-2);
@@ -340,13 +361,10 @@ main {
   border: 1px solid var(--border);
   border-radius: 7px;
   padding: 3px 9px;
-  cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
-  transition: border-color .13s ease, color .13s ease;
 }
-.tmux-btn::before { content: "▸ "; color: var(--muted); }
-.tmux-btn:hover { color: var(--accent); border-color: var(--accent); }
+.tmux-tag::before { content: "▸ "; color: var(--muted); }
 
 .project {
   color: var(--muted);
@@ -852,6 +870,8 @@ button.model-tag:hover { background: var(--lcd); }
   text-align: left;
 }
 .model-menu button:hover { background: var(--surface-3); }
+/* the mode chip sits on the shell's bottom row, so its menu opens upward */
+.model-menu.at-foot { top: auto; right: auto; bottom: 36px; left: 14px; }
 
 /* theme switch */
 .theme-btn {
@@ -880,6 +900,13 @@ button.model-tag:hover { background: var(--lcd); }
   background: #ff6188; color: #fff;
   border-radius: 6px; padding: 2px 6px; flex-shrink: 0;
   animation: pulse 1.6s ease-in-out infinite;
+}
+/* same pill, calmer: a message you started writing here and haven't sent */
+.draft-pip {
+  font: 800 8.5px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+  background: var(--lcd-hi); color: var(--lcd-ink);
+  border: 1.5px solid currentColor;
+  border-radius: 6px; padding: 1px 5px; flex-shrink: 0;
 }
 
 /* state colours tuned for the sage screen */
@@ -979,15 +1006,17 @@ button.model-tag:hover { background: var(--lcd); }
 .shell-meta .sid { color: var(--shell-ink); opacity: .8; }
 
 .tama-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-.tama-foot .mode-chip, .tama-foot .tmux-btn {
+.tama-foot .mode-chip, .tama-foot .tmux-tag {
   font: 600 10px var(--mono);
   color: var(--shell-ink-dim);
   background: color-mix(in srgb, #fff 6%, transparent);
   border: 1.5px solid color-mix(in srgb, var(--shell-ink) 30%, transparent);
-  border-radius: 6px; padding: 2px 8px; cursor: pointer;
+  border-radius: 6px; padding: 2px 8px;
 }
-.tama-foot .tmux-btn::before { content: "▸ "; opacity: .7; }
-.tama-foot .tmux-btn:hover { color: var(--shell-ink); border-color: var(--shell-ink); }
+.tama-foot .tmux-tag::before { content: "▸ "; opacity: .7; }
+/* only the mode chip is interactive down here, and only when it has a pane */
+.tama-foot button.mode-chip { cursor: pointer; }
+.tama-foot button.mode-chip:hover { color: var(--shell-ink); border-color: var(--shell-ink); }
 .tama-foot .time { margin-left: auto; font: 10.5px var(--mono); color: var(--shell-ink-dim); }
 
 /* ---- rename + modal pet ---- */
