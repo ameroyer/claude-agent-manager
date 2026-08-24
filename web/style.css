@@ -594,13 +594,28 @@ main {
   height: 36px;
   padding: 0 18px;
   font: 650 13px var(--sans);
-  color: #fff;
+  color: var(--accent-ink);
   background: var(--accent);
   border: none;
   border-radius: var(--r-inset);
   cursor: pointer;
   transition: filter .13s ease, transform .1s ease;
 }
+/* Stop = interrupt the current turn (Esc), sat next to Send */
+.stop-btn {
+  height: 36px;
+  padding: 0 14px;
+  font: 650 13px var(--sans);
+  color: var(--critical);
+  background: none;
+  border: 1.5px solid color-mix(in srgb, var(--critical) 55%, transparent);
+  border-radius: var(--r-inset);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background .13s ease, transform .1s ease;
+}
+.stop-btn:hover { background: color-mix(in srgb, var(--critical) 14%, transparent); }
+.stop-btn:active { transform: translateY(1px); }
 .send-btn:hover { filter: brightness(1.1); }
 .send-btn:active { transform: translateY(1px); }
 .composer-status { font: 12px var(--mono); width: 52px; align-self: center; }
@@ -632,8 +647,19 @@ main {
 .msg { max-width: 82%; min-width: 0; }
 .msg.user { align-self: flex-end; }
 .msg.assistant { align-self: flex-start; }
-.msg-meta { font: 11px var(--mono); color: var(--muted); margin: 0 4px 4px; display: flex; gap: 8px; }
+.msg-meta { font: 11px var(--mono); color: var(--muted); margin: 0 4px 4px; display: flex; gap: 8px; align-items: center; }
 .msg.user .msg-meta { justify-content: flex-end; }
+/* per-message copy button — visible on hover, always reachable by keyboard */
+.copy-btn {
+  border: none; background: none; cursor: pointer;
+  color: var(--muted); font-size: 12px; line-height: 1;
+  padding: 2px 5px; border-radius: 5px;
+  opacity: 0; transition: opacity .12s ease, color .12s ease;
+}
+.msg:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: var(--accent); background: var(--surface-3); }
+.pending-tag { color: var(--accent); font-style: italic; }
+.msg.pending .msg-text { opacity: .62; }
 .msg-text { padding: 10px 14px; border-radius: 14px; font-size: 13px; overflow-wrap: break-word; color: var(--ink); }
 .msg.user .msg-text {
   background: color-mix(in srgb, var(--accent) 20%, var(--surface));
@@ -980,6 +1006,38 @@ button.model-tag:hover { background: var(--lcd); }
   border-radius: 9px; flex-shrink: 0; background: var(--lcd);
   border: 2px solid var(--shell-edge); }
 .modal-mascot { width: 32px; height: auto; }
+
+
+/* ---------- artifacts tab ---------- */
+.art-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.art-pick, .art-add {
+  font: 12px var(--mono); color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-inset); padding: 6px 9px; outline: none;
+}
+.art-pick { max-width: 340px; }
+.art-add { flex: 1; min-width: 180px; }
+.art-add:focus { border-color: var(--accent); }
+.art-one { font: 600 12px var(--mono); color: var(--ink); }
+.art-count { font: 11px var(--mono); }
+.art-pin-btn {
+  font: 650 12px var(--sans); color: var(--accent-ink); background: var(--accent);
+  border: none; border-radius: var(--r-inset); padding: 6px 14px; cursor: pointer;
+}
+.art-path { font: 10.5px var(--mono); color: var(--muted); margin-bottom: 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.art-body { background: var(--surface-2); border-radius: var(--r-inset); padding: 13px 15px; }
+.art-body .md { color: var(--ink-2); font-size: 13px; }
+.art-sources { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 12px; font: 11px var(--mono); }
+.art-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--surface-3); border-radius: 999px; padding: 3px 6px 3px 10px;
+  color: var(--ink-2);
+}
+.art-unpin { border: none; background: none; cursor: pointer; color: var(--muted);
+  font-size: 11px; line-height: 1; padding: 2px 4px; border-radius: 50%; }
+.art-unpin:hover { color: var(--critical); background: var(--surface); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }

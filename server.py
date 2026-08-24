@@ -34,6 +34,7 @@ PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
 EVENTS_DIR = os.path.join(CLAUDE_DIR, "agent-events")
 STATUS_DIR = os.path.join(CLAUDE_DIR, "agent-status")
 NAMES_FILE = os.path.join(CLAUDE_DIR, "agent-manager-names.json")
+ARTIFACTS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-artifacts.json")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
@@ -281,6 +282,9 @@ def tail_transcript(cwd, session_id):
                     info["last_assistant"] = " ".join(texts)[:600]
         elif t == "user" and not info["last_prompt"]:
             content = (rec.get("message") or {}).get("content")
+            if isinstance(content, list):  # some human turns are text-block lists
+                content = "\n".join(b.get("text", "") for b in content
+                                    if isinstance(b, dict) and b.get("type") == "text")
             if isinstance(content, str) and content.strip() and \
                     not content.startswith("<") and "tool_result" not in line[:200]:
                 info["last_prompt"] = content[:300]
@@ -408,9 +412,19 @@ def load_chat(cwd, session_id):
                 messages.append({"role": "tool", "name": tu["name"],
                                  "detail": tu["detail"], "ts": rec.get("timestamp")})
         else:  # user
-            if not isinstance(content, str):
-                continue  # tool_result message — not a human turn
-            text = content.strip()
+            # Content is usually a plain string, but Claude Code also writes
+            # some human turns as a [{"type":"text"}] list. Treating those as
+            # "not a human turn" silently dropped them from the chat.
+            if isinstance(content, list):
+                if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                       for b in content):
+                    continue  # tool output, not a human turn
+                text = "\n".join(b.get("text", "") for b in content
+                                 if isinstance(b, dict) and b.get("type") == "text").strip()
+            elif isinstance(content, str):
+                text = content.strip()
+            else:
+                continue
             if not text or text.startswith("<"):
                 continue
             pending_think = []  # new human turn; drop any orphan thinking
@@ -421,18 +435,96 @@ def load_chat(cwd, session_id):
     return messages
 
 
-def load_todo_md(cwd):
-    path = os.path.join(cwd, "tasks", "todo.md")
+ART_EXTS = (".md", ".txt")
+ART_MAX_BYTES = 256 * 1024
+ART_MAX_FILES = 60
+
+
+def artifact_sources(cwd, session_id):
+    """Files/folders to surface for a session: whatever the user pinned, plus
+    the conventional <cwd>/tasks/todo.md so it keeps working out of the box."""
+    pinned = (read_json(ARTIFACTS_FILE) or {}).get(session_id) or []
+    default = os.path.join(cwd, "tasks", "todo.md") if cwd else None
+    out = list(pinned)
+    if default and default not in out:
+        out.append(default)
+    return out
+
+
+def list_artifacts(cwd, session_id):
+    """Expand each source into readable .md/.txt files, newest first."""
+    files, seen = [], set()
+    for src in artifact_sources(cwd, session_id):
+        src = os.path.expanduser(src)
+        paths = []
+        if os.path.isdir(src):
+            try:
+                paths = [os.path.join(src, n) for n in sorted(os.listdir(src))
+                         if n.lower().endswith(ART_EXTS)]
+            except OSError:
+                paths = []
+        elif src.lower().endswith(ART_EXTS):
+            paths = [src]
+        for p in paths[:ART_MAX_FILES]:
+            rp = os.path.realpath(p)
+            if rp in seen or not os.path.isfile(rp):
+                continue
+            seen.add(rp)
+            try:
+                st = os.stat(rp)
+            except OSError:
+                continue
+            files.append({"path": rp, "name": os.path.basename(rp),
+                          "mtime": st.st_mtime, "size": st.st_size})
+    files.sort(key=lambda f: -f["mtime"])
+    return files[:ART_MAX_FILES]
+
+
+def read_artifact(cwd, session_id, path):
+    """Read one artifact. The path must be one this session actually exposes —
+    that whitelist is what keeps the endpoint from reading arbitrary files."""
+    allowed = {f["path"] for f in list_artifacts(cwd, session_id)}
+    rp = os.path.realpath(os.path.expanduser(path or ""))
+    if rp not in allowed:
+        return None, "not an artifact of this session"
     try:
-        if os.path.getsize(path) > 64 * 1024:
-            return None
-        with open(path) as f:
-            return f.read()
-    except Exception:
-        return None
+        if os.path.getsize(rp) > ART_MAX_BYTES:
+            return None, "file too large (>256 KB)"
+        with open(rp, errors="replace") as f:
+            return f.read(), None
+    except OSError as e:
+        return None, str(e)
 
 
-def derive_state(registry_status, last_event, transcript_mtime=None, working=None):
+def pin_artifact(session_id, path, remove=False):
+    """Add/remove a file or folder from a session's artifact sources."""
+    if not session_id:
+        return False, "no session"
+    path = os.path.expanduser((path or "").strip())
+    if not remove:
+        if not (os.path.isdir(path) or path.lower().endswith(ART_EXTS)):
+            return False, "pick a .md/.txt file or a folder"
+        if not os.path.exists(path):
+            return False, "path not found"
+    cfg = read_json(ARTIFACTS_FILE) or {}
+    cur = [p for p in (cfg.get(session_id) or []) if p != path]
+    if not remove:
+        cur.append(path)
+    if cur:
+        cfg[session_id] = cur
+    else:
+        cfg.pop(session_id, None)
+    try:
+        with open(ARTIFACTS_FILE + ".tmp", "w") as f:
+            json.dump(cfg, f)
+        os.replace(ARTIFACTS_FILE + ".tmp", ARTIFACTS_FILE)
+    except OSError as e:
+        return False, str(e)
+    return True, ("removed" if remove else "added") + " " + path
+
+
+def derive_state(registry_status, last_event, transcript_mtime=None, working=None,
+                 prompt=None):
     """Display state, with the pane spinner as the ground truth for "working".
 
     `working` (from pane_status) is True when the pane shows an activity spinner
@@ -440,6 +532,8 @@ def derive_state(registry_status, last_event, transcript_mtime=None, working=Non
     pane). Events still distinguish the not-working attention states: a permission
     prompt is needs_input; a finished turn ("waiting for your input"/stop) is
     waiting. Notifications are ignored once the transcript advanced past them."""
+    if prompt:
+        return "needs_input"  # the pane is literally showing a menu
     if working:
         return "busy"
     if last_event:
@@ -492,6 +586,34 @@ def proc_foreground(pid):
 
 
 _ACTIVITY_RE = re.compile(r"([A-Z][a-zA-Z]+…\s*\([^)]*\))")
+_OPTION_RE = re.compile(r"^[\s❯>]*(\d)\.\s+(.+?)\s*$")
+
+
+def detect_prompt(lines):
+    """Read Claude Code's permission dialog straight off the pane.
+
+    Hooks are optional, so the dialog itself — a question plus numbered
+    options — is the ground truth for "this agent is waiting on you".
+    Kept strict (options must run 1..n and include a "yes") so ordinary
+    numbered lists in the conversation don't trigger it."""
+    opts = {}
+    for ln in lines:
+        m = _OPTION_RE.match(ln)
+        if m:
+            opts[m.group(1)] = m.group(2)[:60]
+    keys = sorted(opts)
+    if len(keys) < 2 or keys != [str(i) for i in range(1, len(keys) + 1)]:
+        return None
+    if not any("yes" in v.lower() for v in opts.values()):
+        return None
+    question = None
+    for ln in lines:  # last text line before the options is the question
+        if _OPTION_RE.match(ln):
+            break
+        if ln.strip():
+            question = ln.strip()[:160]
+    return {"question": question,
+            "options": [{"key": k, "label": opts[k]} for k in keys]}
 
 
 def pane_status(target):
@@ -500,10 +622,10 @@ def pane_status(target):
     Mode is the bottom status line ('⏵⏵ auto mode on · …'). Activity is the
     spinner line while the agent works ('✽ Ideating… (1m 39s · ↓ 6.2k tokens)').
     Only the bottom line is used for mode so conversation text can't spoof it."""
-    result = {"mode": None, "activity": None, "working": None}
+    result = {"mode": None, "activity": None, "working": None, "prompt": None}
     if not target:
         return result
-    out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-8"])
+    out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-20"])
     lines = [ln for ln in out.splitlines() if ln.strip()]
     if not lines:
         return result
@@ -526,6 +648,7 @@ def pane_status(target):
             break
     # "esc to interrupt" or a spinner line means the agent is actively working.
     result["working"] = bool(result["activity"]) or "esc to interrupt" in out.lower()
+    result["prompt"] = detect_prompt(lines)
     return result
 
 
@@ -665,8 +788,10 @@ def build_agent(reg, pid_to_pane, names=None):
                       "ts": chat_msgs[i].get("ts"),
                       "thinking": (chat_msgs[i].get("thinking") or "")[:2500] or None}
                      for i in sorted(i for i in (lu_i, la_i) if i is not None)]
-    pstatus = pane_status(pane["target"]) if pane else {"mode": None, "activity": None, "working": None}
-    state = derive_state(reg.get("status"), last_event, tinfo["mtime"], pstatus["working"])
+    pstatus = pane_status(pane["target"]) if pane else {
+        "mode": None, "activity": None, "working": None, "prompt": None}
+    state = derive_state(reg.get("status"), last_event, tinfo["mtime"],
+                         pstatus["working"], pstatus["prompt"])
     notif_msg = None
     if last_event and last_event.get("event") == "notification" and state in ("needs_input", "waiting"):
         notif_msg = last_event.get("message")
@@ -717,8 +842,8 @@ def build_agent(reg, pid_to_pane, names=None):
         "permission_mode": pstatus["mode"] or tinfo["permission_mode"],
         "activity": pstatus["activity"] if state == "busy" else None,
         "pending_tool": tinfo["pending_tool"] if state == "needs_input" else None,
+        "prompt": pstatus["prompt"],
         "agent_status": status,
-        "todo_md": load_todo_md(cwd),
     }
 
 
@@ -810,19 +935,32 @@ def valid_pane(target):
 
 
 def send_text(target, text):
-    """Paste a message into the agent's composer and submit it."""
-    if not valid_pane(target):
-        return False, "unknown pane"
+    """Paste a message into the agent's composer and submit it.
+
+    A busy pane can swallow the Enter, leaving the message sitting unsent in
+    the composer — so after submitting we check whether the text is still on
+    the input line and press Enter once more if it is."""
     if not text.strip():
         return False, "empty message"
+    if not valid_pane(target):
+        return False, "unknown pane"
+    enter = ["tmux", "send-keys", "-t", target, "Enter"]
     try:
         subprocess.run(["tmux", "load-buffer", "-b", "claude-agent-manager", "-"],
                        input=text.encode(), timeout=5, check=True)
         subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", "claude-agent-manager",
                         "-t", target], timeout=5, check=True)
-        time.sleep(0.35)  # let the composer settle so Enter isn't swallowed
-        subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
-                       timeout=5, check=True)
+        time.sleep(0.5)  # let the composer settle so Enter isn't swallowed
+        subprocess.run(enter, timeout=5, check=True)
+        time.sleep(0.4)
+        # still on the input line? then the first Enter didn't take.
+        tail = [ln for ln in
+                run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-3"]).splitlines()
+                if ln.strip()]
+        probe = text.strip().splitlines()[0][:20]
+        if tail and probe and probe in tail[-1]:
+            subprocess.run(enter, timeout=5, check=True)
+            return True, "sent (needed a second Enter)"
     except Exception as e:
         return False, str(e)
     return True, "sent"
@@ -857,7 +995,7 @@ def set_model(target, model):
     return True, " | ".join(tail[-2:]) if tail else "sent"
 
 
-ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "y", "n"}
+ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "4", "y", "n"}
 
 
 def send_key(target, key):
@@ -1014,6 +1152,23 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/state":
                 self._send(200, cached_state())
                 return
+            if route == "/api/artifacts":
+                q = parse_qs(urlparse(self.path).query)
+                sid = q.get("sid", [""])[0]
+                agent = next((a for a in cached_state()["agents"]
+                              if a["sessionId"] == sid), None)
+                if not agent:
+                    self._send(404, {"error": "unknown session"})
+                    return
+                cwd = agent["cwd"]
+                files = list_artifacts(cwd, sid)
+                path = q.get("path", [""])[0] or (files[0]["path"] if files else "")
+                text, err = read_artifact(cwd, sid, path) if path else (None, None)
+                self._send(200, {"files": files,
+                                 "sources": artifact_sources(cwd, sid),
+                                 "path": path if text is not None else "",
+                                 "text": text or "", "error": err})
+                return
             if route == "/api/sessions":
                 cwd = parse_qs(urlparse(self.path).query).get("cwd", [""])[0]
                 self._send(200, {"sessions": list_resumable(cwd)})
@@ -1060,6 +1215,8 @@ class Handler(BaseHTTPRequestHandler):
                                                      b.get("name", "")),
                    "/api/model": lambda b: set_model(b.get("target", ""),
                                                      b.get("model", "")),
+                   "/api/artifact-pin": lambda b: pin_artifact(
+                       b.get("sid", ""), b.get("path", ""), b.get("remove", False)),
                    "/api/spawn": lambda b: spawn_session(b.get("cwd", ""),
                                                          b.get("prompt", ""),
                                                          b.get("name", ""),

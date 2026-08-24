@@ -399,30 +399,6 @@ function mdHtml(text) {
   return `<div class="md">${out.join("")}</div>`;
 }
 
-/* ---------- minimal todo.md renderer ---------- */
-
-function todoMdHtml(md) {
-  const out = [];
-  let inList = false;
-  for (const raw of md.split("\n")) {
-    const line = raw.trimEnd();
-    const li = line.match(/^\s*[-*]\s+(?:\[([ xX])\]\s+)?(.*)$/);
-    const h = line.match(/^(#{1,3})\s+(.*)$/);
-    if (li) {
-      if (!inList) { out.push("<ul>"); inList = true; }
-      const done = li[1] && li[1] !== " ";
-      const box = li[1] !== undefined ? (done ? "☑ " : "☐ ") : "";
-      out.push(`<li class="${done ? "done" : ""}">${box}${esc(li[2])}</li>`);
-      continue;
-    }
-    if (inList) { out.push("</ul>"); inList = false; }
-    if (h) out.push(`<h${h[1].length + 1}>${esc(h[2])}</h${h[1].length + 1}>`);
-    else if (line.trim()) out.push(`<p>${esc(line)}</p>`);
-  }
-  if (inList) out.push("</ul>");
-  return `<div class="todo-md">${out.join("")}</div>`;
-}
-
 /* ---------- cards ---------- */
 
 function summaryLine(a) {
@@ -441,8 +417,26 @@ function keyBtn(target, key, label, cls) {
   return `<button class="key-btn ${cls}" data-target="${esc(target)}" data-key="${esc(key)}">${label}</button>`;
 }
 
+/* Mirror whatever menu the CLI is actually showing, so the buttons match the
+   real options (manual mode included). Falls back to the classic trio when the
+   pane can't be read. */
 function approvalActionsHtml(a) {
   if (a.state !== "needs_input" || !a.tmux) return "";
+  const opts = a.prompt && a.prompt.options;
+  if (opts && opts.length) {
+    // "Yes" and "Yes, allow all edits" share a first segment — when the short
+    // forms collide, keep enough of the label to tell the buttons apart.
+    const heads = opts.map(o => o.label.split(/[,(]/)[0].trim());
+    const labels = opts.map((o, i) =>
+      heads.filter(h => h === heads[i]).length > 1
+        ? o.label.slice(0, 20).trim() + (o.label.length > 20 ? "…" : "")
+        : heads[i] || o.key);
+    return `<div class="approve-row">${opts.map((o, i) => {
+      const cls = /^\s*no\b/i.test(o.label) ? "no" : i === 0 ? "ok" : "alt";
+      return `<button class="key-btn ${cls}" data-target="${esc(a.tmux.target)}"
+        data-key="${esc(o.key)}" title="${esc(o.key)}. ${esc(o.label)}">${esc(labels[i])}</button>`;
+    }).join("")}</div>`;
+  }
   return `<div class="approve-row">
     ${keyBtn(a.tmux.target, "1", "✓ Approve", "ok")}
     ${keyBtn(a.tmux.target, "2", "Always", "alt")}
@@ -531,7 +525,7 @@ function contextDetailHtml(a) {
 function pendingLabel(a) {
   const p = a.pending_tool;
   if (p) return p.name + (p.detail ? ": " + p.detail : "");
-  return a.notification || "Needs your approval";
+  return (a.prompt && a.prompt.question) || a.notification || "Needs your approval";
 }
 
 function cardHtml(a) {
@@ -601,7 +595,7 @@ const TABS = [
   {id: "overview", label: "Overview", show: () => true},
   {id: "graph", label: "Work graph", show: a => !!agentGraph(a)},
   {id: "exchange", label: "Exchange", show: a => a.last_prompt || a.last_assistant},
-  {id: "todo", label: "todo.md", show: a => !!a.todo_md},
+  {id: "artifacts", label: "Artifacts", show: () => true},
 ];
 
 function tabbarHtml(a) {
@@ -619,16 +613,40 @@ function toolLine(m) {
   </div>`;
 }
 
-function chatBubble(role, text, who, ts, thinking) {
+function chatBubble(role, text, who, ts, thinking, pending) {
   const think = (role !== "user" && thinking)
     ? `<details class="think"><summary>Thinking</summary>
         <div class="think-body">${mdHtml(thinking)}</div></details>`
     : "";
-  return `<div class="msg ${role === "user" ? "user" : "assistant"}">
-    <div class="msg-meta">${esc(who)}${ts ? `<span>${msgTime(ts)}</span>` : ""}</div>
+  return `<div class="msg ${role === "user" ? "user" : "assistant"}${pending ? " pending" : ""}">
+    <div class="msg-meta">${esc(who)}${ts ? `<span>${msgTime(ts)}</span>` : ""}
+      ${pending ? `<span class="pending-tag">sending…</span>` : ""}
+      <button class="copy-btn" data-copy="${esc(text)}" title="Copy this message">⧉</button>
+    </div>
     ${think}
     <div class="msg-text">${mdHtml(text)}</div>
   </div>`;
+}
+
+/* Copy to clipboard; falls back to execCommand outside secure contexts. */
+async function copyText(text, btn) {
+  let ok = true;
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      ta.remove();
+    } catch { ok = false; }
+  }
+  if (btn) {
+    btn.textContent = ok ? "✓" : "✕";
+    setTimeout(() => { btn.textContent = "⧉"; }, 1200);
+  }
 }
 
 function lastExchangeHtml(a) {
@@ -661,7 +679,7 @@ function lastExchangeHtml(a) {
   if (!msgs.length) return "";
   return `<div class="section">
     <div class="section-title">Last exchange</div>
-    <div class="chat">${renderChatEntries(a, msgs)}</div></div>`;
+    <div class="chat">${renderChatEntries(a, withPending(a, msgs))}</div></div>`;
 }
 
 function summarySectionHtml(a) {
@@ -739,6 +757,11 @@ async function loadChat(sid) {
       const changed = !chat.messages || chat.sid !== sid ||
         JSON.stringify(chat.messages) !== JSON.stringify(d.messages);
       chat = {sid, messages: d.messages || []};
+      if (pending && pending.sid === sid) {
+        const head = pending.text.trim().slice(0, 60);
+        const landed = chat.messages.some(m => m.role === "user" && m.text.trim().startsWith(head));
+        if (landed || Date.now() - pending.ts > 60000) pending = null;
+      }
       // Overview's last-exchange also uses the chat, so refresh it too.
       if (changed && (activeTab === "exchange" || activeTab === "overview")) renderModal();
     }
@@ -758,7 +781,7 @@ function renderChatEntries(a, msgs) {
       return `<div class="chat-gap">… ${m.count} earlier step${m.count === 1 ? "" : "s"} — open Exchange for the full turn</div>`;
     }
     if (m.role === "tool") return toolLine(m);
-    return chatBubble(m.role, m.text, m.role === "user" ? "You" : name, m.ts, m.thinking);
+    return chatBubble(m.role, m.text, m.role === "user" ? "You" : name, m.ts, m.thinking, m.pending);
   }).join("");
 }
 
@@ -769,15 +792,63 @@ function exchangeTab(a) {
   if (!chat.messages.length) {
     return `<div class="section"><div class="chat-loading">No conversation found in the transcript tail.</div></div>`;
   }
-  return `<div class="section"><div class="chat">${renderChatEntries(a, chat.messages)}</div></div>`;
+  return `<div class="section"><div class="chat">${renderChatEntries(a, withPending(a, chat.messages))}</div></div>`;
+}
+
+/* ---------- artifacts: any .md/.txt files or folders you pin ---------- */
+
+let arts = {sid: null, files: [], sources: [], path: "", text: "", error: null};
+
+async function loadArtifacts(sid, path) {
+  const q = `/api/artifacts?sid=${encodeURIComponent(sid)}` +
+            (path ? `&path=${encodeURIComponent(path)}` : "");
+  try {
+    const d = await (await fetch(q, {headers: authHeaders()})).json();
+    if (openSid !== sid) return;
+    arts = {sid, files: d.files || [], sources: d.sources || [],
+            path: d.path || "", text: d.text || "", error: d.error || null};
+    if (activeTab === "artifacts") renderModal();
+  } catch { /* next open retries */ }
+}
+
+function artifactBody() {
+  if (arts.error) return `<div class="chat-loading">${esc(arts.error)}</div>`;
+  if (!arts.path) return `<div class="chat-loading">Nothing to show yet — pin a file or folder below.</div>`;
+  return arts.path.toLowerCase().endsWith(".txt")
+    ? `<pre class="codeblock"><code>${esc(arts.text)}</code></pre>`
+    : mdHtml(arts.text);
+}
+
+function artifactsTab(a) {
+  if (arts.sid !== a.sessionId) {
+    loadArtifacts(a.sessionId);
+    return `<div class="section"><div class="chat-loading">Loading artifacts…</div></div>`;
+  }
+  const picker = arts.files.length > 1
+    ? `<select class="art-pick">${arts.files.map(f =>
+        `<option value="${esc(f.path)}"${f.path === arts.path ? " selected" : ""}
+         >${esc(f.name)} · ${ago(f.mtime)}</option>`).join("")}</select>`
+    : arts.files.length === 1 ? `<span class="art-one">${esc(arts.files[0].name)}</span>` : "";
+  const chips = arts.sources.map(src =>
+    `<span class="art-chip" title="${esc(src)}">${esc(src.split("/").slice(-2).join("/"))}
+      <button class="art-unpin" data-path="${esc(src)}" title="Stop watching this">✕</button></span>`).join("");
+  return `<div class="section">
+    <div class="art-bar">
+      ${picker}
+      <span class="art-count dim">${arts.files.length} file${arts.files.length === 1 ? "" : "s"}</span>
+      <input class="art-add" placeholder="pin a .md/.txt file or a folder…">
+      <button class="art-pin-btn">Pin</button>
+    </div>
+    ${arts.path ? `<div class="art-path" title="${esc(arts.path)}">${esc(arts.path)}</div>` : ""}
+    <div class="art-body">${artifactBody()}</div>
+    <div class="art-sources"><span class="dim">watching:</span> ${chips || '<span class="dim">nothing pinned</span>'}</div>
+  </div>`;
 }
 
 function modalHtml(a) {
   if (activeTab === "graph") return graphTab(a);
   if (activeTab === "exchange") return exchangeTab(a);
-  if (activeTab === "todo") {
-    return `<div class="section">${todoMdHtml(a.todo_md || "")}</div>`;
-  }
+  if (activeTab === "artifacts") return artifactsTab(a);
   return overviewTab(a);
 }
 
@@ -805,6 +876,7 @@ function composerHtml(a) {
     <textarea class="composer-input" rows="3"
       placeholder="Message ${esc(a.name)}…  (Enter to send, Shift+Enter for newline)"></textarea>
     <button class="send-btn">Send</button>
+    <button class="stop-btn" title="Interrupt what the agent is doing (sends Esc)">Stop</button>
     <span class="composer-status"></span>
   </div>`;
 }
@@ -870,13 +942,35 @@ function flashStatus(ok) {
   setTimeout(() => { el.textContent = ""; }, 2000);
 }
 
+/* Your message, shown immediately; cleared once the transcript catches up
+   (Claude Code writes the turn to disk a beat after we paste it). */
+let pending = null;  // {sid, text, ts}
+
+function withPending(a, msgs) {
+  return pending && pending.sid === a.sessionId
+    ? msgs.concat([{role: "user", text: pending.text, ts: pending.ts, pending: true}])
+    : msgs;
+}
+
 async function sendMessage() {
   const a = currentAgent();
   const input = modal.querySelector(".composer-input");
   if (!a?.tmux || !input || !input.value.trim()) return;
   const text = input.value;
   input.value = "";
-  flashStatus((await post("/api/send", {target: a.tmux.target, text})).ok);
+  pending = {sid: a.sessionId, text, ts: Date.now()};
+  renderModal();
+  const r = await post("/api/send", {target: a.tmux.target, text});
+  flashStatus(r.ok);
+  if (!r.ok) { pending = null; renderModal(); return; }
+  loadChat(a.sessionId);                                   // catch it early
+  setTimeout(() => loadChat(a.sessionId), 900);            // and once it lands
+}
+
+async function stopAgent() {
+  const a = currentAgent();
+  if (!a?.tmux) return;
+  flashStatus((await post("/api/key", {target: a.tmux.target, key: "Escape"})).ok);
 }
 
 function wireComposer() {
@@ -914,6 +1008,7 @@ function wireComposer() {
     e.stopPropagation();
   });
   modal.querySelector(".send-btn").addEventListener("click", sendMessage);
+  modal.querySelector(".stop-btn")?.addEventListener("click", stopAgent);
 }
 
 function renderModal() {
@@ -930,6 +1025,8 @@ function renderModal() {
   if (!editingName) modal.querySelector(".modal-head").innerHTML = modalHeadHtml(a);
   modal.querySelector(".tabbar").innerHTML = tabbarHtml(a);
   const body = modal.querySelector(".modal-body");
+  if (body.contains(document.activeElement) &&
+      document.activeElement.classList.contains("art-add")) return;  // mid-typing
   const scroll = activeTab === lastRenderedTab ? body.scrollTop : 0;
   body.innerHTML = modalHtml(a);
   const msgs = chat.messages || [];
@@ -949,6 +1046,7 @@ function openModal(sid) {
   activeTab = "exchange";  // land on the conversation, scrolled to the latest
   lastRenderedTab = null;
   chat = {sid: null, messages: null};
+  arts = {sid: null, files: [], sources: [], path: "", text: "", error: null};
   overlay.classList.remove("hidden");
   renderModal();
   loadChat(sid);  // populate the Overview's last-exchange tail promptly
@@ -1095,6 +1193,24 @@ document.body.addEventListener("click", e => {
     killAgent(kill);
     return;
   }
+  const unpin = e.target.closest(".art-unpin");
+  if (unpin) {
+    e.stopPropagation();
+    post("/api/artifact-pin", {sid: openSid, path: unpin.dataset.path, remove: true})
+      .then(() => loadArtifacts(openSid));
+    return;
+  }
+  if (e.target.closest(".art-pin-btn")) {
+    e.stopPropagation();
+    pinArtifact();
+    return;
+  }
+  const cp = e.target.closest(".copy-btn");
+  if (cp) {
+    e.stopPropagation();
+    copyText(cp.dataset.copy, cp);
+    return;
+  }
   if (e.target.closest(".rename-btn")) {
     e.stopPropagation();
     startRename();
@@ -1114,11 +1230,25 @@ document.body.addEventListener("click", e => {
   if (tab) {
     activeTab = tab.dataset.tab;
     if (activeTab === "exchange" && openSid) loadChat(openSid);
+    if (activeTab === "artifacts" && openSid) loadArtifacts(openSid, arts.path);
     renderModal();
     return;
   }
   const card = e.target.closest(".card");
   if (card) openModal(card.dataset.sid);
+});
+
+async function pinArtifact() {
+  const input = modal.querySelector(".art-add");
+  const path = input && input.value.trim();
+  if (!path || !openSid) return;
+  const r = await post("/api/artifact-pin", {sid: openSid, path});
+  if (r.ok) { input.value = ""; loadArtifacts(openSid); }
+  else toast(r.msg || "could not pin that path", true);
+}
+
+document.body.addEventListener("change", e => {
+  if (e.target.closest(".art-pick") && openSid) loadArtifacts(openSid, e.target.value);
 });
 
 document.addEventListener("keydown", e => {
