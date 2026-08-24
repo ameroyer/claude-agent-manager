@@ -83,7 +83,11 @@ you restart them.
 - Approve or deny a permission prompt right from the card — it shows what's
   being requested (e.g. `Bash: rm -rf …`).
 - Type a message to an agent and it lands in that pane.
-- Spawn a new agent (pick a folder + optional first message) or kill one.
+- Spawn a new agent (pick a folder + optional first message), resume a past
+  conversation from that folder (`claude --resume`), or kill one.
+- If a session ever fails to show up on the board, open `/api/debug?token=…` —
+  it lists every tmux-pane process and registry entry with the checks each one
+  passed, which pinpoints why it was filtered out.
 - Rename a session from its popup (the ✎ next to the name); names persist in
   `~/.claude/agent-manager-names.json`.
 - See each card's working directory, git repo · branch @ commit, birth time, and

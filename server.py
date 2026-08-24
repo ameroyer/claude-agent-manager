@@ -178,6 +178,48 @@ def transcript_path(cwd, session_id):
     return os.path.join(PROJECTS_DIR, slug, f"{session_id}.jsonl")
 
 
+def transcript_title(path):
+    """ai-title records are written early in the transcript — scan the head."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64 * 1024).decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in head.splitlines():
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("type") == "ai-title":
+            return rec.get("aiTitle") or rec.get("title")
+    return None
+
+
+def list_resumable(cwd):
+    """Past conversations for a cwd, newest first, for `claude --resume`."""
+    cwd = os.path.expanduser((cwd or "").strip()).rstrip("/") or "/"
+    d = os.path.join(PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", cwd))
+    live = {a["sessionId"] for a in cached_state()["agents"]}
+    out = []
+    try:
+        names = [f for f in os.listdir(d) if f.endswith(".jsonl")]
+    except OSError:
+        return []
+    for f in names:
+        p = os.path.join(d, f)
+        try:
+            m = os.path.getmtime(p)
+        except OSError:
+            continue
+        out.append({"sid": f[:-len(".jsonl")], "mtime": m})
+    out.sort(key=lambda s: -s["mtime"])
+    out = out[:20]  # titles need a head-read each; cap the work
+    for s in out:
+        s["title"] = transcript_title(os.path.join(d, s["sid"] + ".jsonl"))
+        s["live"] = s["sid"] in live
+    return out
+
+
 _tail_cache = {}
 
 
@@ -207,20 +249,7 @@ def tail_transcript(cwd, session_id):
     except Exception:
         return info
     if info["title"] is None:
-        # ai-title records are written early in the transcript, usually
-        # far outside the tail window — scan the head for them too.
-        try:
-            with open(path, "rb") as f:
-                head = f.read(64 * 1024).decode("utf-8", "replace")
-            for line in head.splitlines():
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    continue
-                if rec.get("type") == "ai-title":
-                    info["title"] = rec.get("aiTitle") or rec.get("title")
-        except Exception:
-            pass
+        info["title"] = transcript_title(path)
     for line in reversed(lines):
         if (info["last_assistant"] and info["last_prompt"] and info["title"]
                 and info["permission_mode"]):
@@ -429,6 +458,19 @@ def derive_state(registry_status, last_event, transcript_mtime=None, working=Non
     return "busy" if registry_status == "busy" else "idle"
 
 
+def proc_start_time(pid):
+    """True process start as epoch seconds (field 22 of /proc/<pid>/stat).
+    The /proc dir's own mtime is NOT the start time and must not be used."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            ticks = float(f.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+        return time.time() - (uptime - ticks / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def proc_comm(pid):
     try:
         with open(f"/proc/{pid}/comm") as f:
@@ -529,7 +571,8 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
             cwd = os.readlink(f"/proc/{pid}/cwd")
         except OSError:
             continue
-        sid = newest_session_id(cwd, since=st.st_mtime)
+        started = proc_start_time(pid) or st.st_mtime
+        sid = newest_session_id(cwd, since=started)
         if sid in seen_sids:
             continue
         recent = False
@@ -545,7 +588,7 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
                     "status": "busy" if recent else "idle",
                     "name": os.path.basename(cwd.rstrip("/")) or cwd,
                     "nameSource": "derived", "statusUpdatedAt": None,
-                    "startedAt": st.st_mtime})
+                    "startedAt": started})
     return out
 
 
@@ -711,6 +754,41 @@ def build_state():
             "spawn_dir": spawn_dir + "/"}
 
 
+def debug_state():
+    """Why is a session (not) on the board? One row per tmux-pane process,
+    plus every registry entry with the checks it passed. GET /api/debug."""
+    pid_to_pane = tmux_pane_index()
+    procs = []
+    for pid, pane in pid_to_pane.items():
+        comm = proc_comm(pid)
+        if comm is None or (comm != "claude" and pid != pane["pid"]):
+            continue  # only claudes + each pane's root process — keep it readable
+        row = {"pid": pid, "comm": comm, "pane": pane["target"],
+               "foreground": proc_foreground(pid)}
+        try:
+            row["cwd"] = os.readlink(f"/proc/{pid}/cwd")
+            row["uid_ok"] = os.stat(f"/proc/{pid}").st_uid == os.getuid()
+            row["started"] = proc_start_time(pid)
+        except OSError:
+            pass
+        if comm == "claude" and row.get("cwd"):
+            row["recovered_sid"] = newest_session_id(row["cwd"],
+                                                     since=row.get("started") or 0)
+        procs.append(row)
+    regs = []
+    if os.path.isdir(SESSIONS_DIR):
+        for name in os.listdir(SESSIONS_DIR):
+            if not name.endswith(".json"):
+                continue
+            reg = read_json(os.path.join(SESSIONS_DIR, name)) or {}
+            pid = reg.get("pid", -1)
+            regs.append({"file": name, "pid": pid, "sid": reg.get("sessionId"),
+                         "cwd": reg.get("cwd"), "alive": pid_alive(pid),
+                         "in_pane": pid in pid_to_pane,
+                         "foreground": pid_alive(pid) and proc_foreground(pid)})
+    return {"panes_procs": procs, "registry": regs, "generated_at": time.time()}
+
+
 _cache = {"t": 0.0, "state": None}
 _cache_lock = threading.Lock()
 
@@ -748,6 +826,29 @@ def send_text(target, text):
     except Exception as e:
         return False, str(e)
     return True, "sent"
+
+
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._\[\]-]{1,64}$")
+
+
+def set_model(target, model):
+    """Type `/model <id>` into the session (typed, not pasted, so the CLI
+    parses it as a slash command). C-u first clears any half-typed input."""
+    if not valid_pane(target):
+        return False, "unknown pane"
+    if not _MODEL_ID_RE.fullmatch(model or ""):
+        return False, "bad model id"
+    try:
+        subprocess.run(["tmux", "send-keys", "-t", target, "C-u"],
+                       timeout=5, check=True)
+        subprocess.run(["tmux", "send-keys", "-t", target, "-l", f"/model {model}"],
+                       timeout=5, check=True)
+        time.sleep(0.35)  # let the command autocomplete settle
+        subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
+                       timeout=5, check=True)
+    except Exception as e:
+        return False, str(e)
+    return True, f"sent /model {model}"
 
 
 ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "y", "n"}
@@ -799,15 +900,36 @@ def kill_session(session_id):
                 return False, str(e)
     if not killed:
         return False, "nothing to kill (no pane, not our process)"
+    # Verify the process actually died (pane kill is async; Claude Code ignores
+    # some signals), and scrub its registry file so a stale entry can't keep
+    # the card on the board.
+    for _ in range(15):
+        if not pid_alive(pid):
+            break
+        time.sleep(0.1)
+    else:
+        killed += " — process still shutting down"
+    try:
+        reg_path = os.path.join(SESSIONS_DIR, f"{pid}.json")
+        reg = read_json(reg_path)
+        if reg and reg.get("sessionId") == session_id:
+            os.remove(reg_path)
+    except OSError:
+        pass
     _cache["t"] = 0.0  # force a fresh state on next poll
     return True, killed
 
 
-def spawn_session(cwd, prompt, name=None):
-    """Launch `claude` in a new detached tmux session at cwd."""
+def spawn_session(cwd, prompt, name=None, resume=None):
+    """Launch `claude` (or `claude --resume <sid>`) in a new tmux session."""
     cwd = os.path.expanduser(cwd or "").strip()
     if not cwd or not os.path.isdir(cwd):
         return False, "directory not found"
+    launch = "claude"
+    if resume:
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", resume):
+            return False, "bad session id"
+        launch = f"claude --resume {resume}"
     requested = re.sub(r"[^A-Za-z0-9_-]", "-", (name or "").strip()).strip("-")
     base = requested or re.sub(r"[^A-Za-z0-9_-]",
                                "-", os.path.basename(cwd.rstrip("/")) or "agent")
@@ -823,7 +945,7 @@ def spawn_session(cwd, prompt, name=None):
             ["tmux", "new-session", "-d", "-s", name, "-c", cwd,
              "-P", "-F", "#{pane_id}"],
             capture_output=True, text=True, timeout=5, check=True).stdout.strip()
-        subprocess.run(["tmux", "send-keys", "-t", pane, "claude", "Enter"],
+        subprocess.run(["tmux", "send-keys", "-t", pane, launch, "Enter"],
                        timeout=5, check=True)
         if prompt and prompt.strip():
             time.sleep(2.5)  # let claude boot before sending the first message
@@ -886,6 +1008,13 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/state":
                 self._send(200, cached_state())
                 return
+            if route == "/api/sessions":
+                cwd = parse_qs(urlparse(self.path).query).get("cwd", [""])[0]
+                self._send(200, {"sessions": list_resumable(cwd)})
+                return
+            if route == "/api/debug":
+                self._send(200, debug_state())
+                return
             if route == "/api/chat":
                 sid = parse_qs(urlparse(self.path).query).get("sid", [""])[0]
                 agent = next((a for a in cached_state()["agents"]
@@ -923,9 +1052,12 @@ class Handler(BaseHTTPRequestHandler):
                    "/api/kill": lambda b: kill_session(b.get("sid", "")),
                    "/api/rename": lambda b: set_name(b.get("sid", ""),
                                                      b.get("name", "")),
+                   "/api/model": lambda b: set_model(b.get("target", ""),
+                                                     b.get("model", "")),
                    "/api/spawn": lambda b: spawn_session(b.get("cwd", ""),
                                                          b.get("prompt", ""),
-                                                         b.get("name", ""))}
+                                                         b.get("name", ""),
+                                                         b.get("resume", ""))}
         action = actions.get(self.path)
         if not action:
             self._send(404, {"error": "not found"})

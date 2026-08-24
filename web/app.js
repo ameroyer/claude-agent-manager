@@ -14,6 +14,23 @@ let spawnDir = "~/";  // server expands ~; refined from /api/state
 const token = location.hash.slice(1);
 const authHeaders = extra => Object.assign({"X-Auth-Token": token}, extra || {});
 
+/* "new" pastille: Claude answered after the last time you opened that card.
+   Seen marks live in localStorage (per-browser; wrapped for private mode). */
+let seen = {};
+try { seen = JSON.parse(localStorage.tamaSeen || "{}"); } catch { /* fresh */ }
+let seenReady = (() => { try { return "tamaSeen" in localStorage; } catch { return true; } })();
+function saveSeen() { try { localStorage.tamaSeen = JSON.stringify(seen); } catch { /* ignore */ } }
+function markSeen(a) {  // true when the mark actually moved (caller then saves)
+  if (!a || !a.transcript_mtime || seen[a.sessionId] === a.transcript_mtime) return false;
+  seen[a.sessionId] = a.transcript_mtime;
+  return true;
+}
+function hasNew(a) {
+  if (a.state === "busy" || a.state === "needs_input" || !a.transcript_mtime) return false;
+  const s = seen[a.sessionId];
+  return s === undefined || a.transcript_mtime > s + 2;
+}
+
 const STATE_LABEL = {
   needs_input: "needs approval",
   waiting: "waiting for you",
@@ -72,7 +89,7 @@ const MODEL_SKIN = {
   opus:   {label: "Opus",   body: "#ab9df2", outline: "#7568b8"},
   sonnet: {label: "Sonnet", body: "#78dce8", outline: "#4899a5"},
   haiku:  {label: "Haiku",  body: "#a9dc76", outline: "#6f9c48"},
-  other:  {label: "Claude", body: "#d08b6c", outline: "#9a5c40"},
+  other:  {label: "Egg", body: "#d08b6c", outline: "#9a5c40"},  // model not known yet
 };
 const MODEL_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
 
@@ -129,6 +146,17 @@ const paint = (role, accent) => CLR[role] || accent;
 const EYES = [[6,6,"E"],[6,7,"E"],[11,6,"E"],[11,7,"E"]];
 const ZZZ = [[1,1,"z"],[2,0,"z"],[2,2,"z"]];
 
+// Before the first reply the model is unknown — the pet is still an egg.
+const EGG = (() => {
+  const rows = {2:[8,9], 3:[7,10], 4:[6,11], 5:[6,11], 6:[5,12], 7:[5,12],
+                8:[5,12], 9:[5,12], 10:[6,11], 11:[7,10]};
+  const c = [];
+  for (const [y, [x0, x1]] of Object.entries(rows))
+    for (let x = x0; x <= x1; x++) c.push([x, +y]);
+  return c;
+})();
+const EGG_SPECKLES = [[8,3,"W"],[6,8,"W"],[11,5,"W"],[9,10,"W"]];
+
 // Kits: [x, y, role] — G gold, S steel, W white, D wood, A repo accent.
 // Hats live in rows 0–3; held items attach at the arms (rows 7–8).
 const KIT = {
@@ -158,8 +186,13 @@ function mascotSvg(a, cls = "") {
   const px = [];
   const cell = (x, y, c) =>
     px.push(`<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${c}"/>`);
-  CREATURE.forEach(([x, y, r]) => cell(x, y, r === "T" ? skin.body : skin.outline));
-  (KIT[kit] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+  if (!(a.context_breakdown || {}).model) {  // no reply yet: an egg, no outfit
+    EGG.forEach(([x, y]) => cell(x, y, skin.body));
+    EGG_SPECKLES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+  } else {
+    CREATURE.forEach(([x, y, r]) => cell(x, y, r === "T" ? skin.body : skin.outline));
+    (KIT[kit] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+  }
   EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
   if (a.state === "idle") ZZZ.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
   return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${cls}"
@@ -168,7 +201,7 @@ function mascotSvg(a, cls = "") {
 }
 
 function legendHtml() {
-  return `<div class="legend" title="Mascot colour = model">
+  return `<div class="legend" title="Pet colour = model. Egg = session hasn't replied yet, so its model isn't known.">
     ${MODEL_ORDER.map(k => `<span class="legend-item">
       <span class="legend-dot" style="background:${MODEL_SKIN[k].body}"></span>${MODEL_SKIN[k].label}</span>`).join("")}
   </div>`;
@@ -496,8 +529,12 @@ function cardHtml(a) {
       <div class="tama-top">
         <span class="state-ico ${esc(a.state)}" title="${STATE_LABEL[a.state] || ""}">${STATE_ICON[a.state] || "○"}</span>
         <span class="agent-name" title="${esc(a.name)} — click to open, rename inside">${esc(a.display_name || a.name)}</span>
-        <span class="model-tag" title="Model — the pet's colour">${esc(model.label)}</span>
+        ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
+        ${a.tmux ? `<button class="model-tag" data-target="${esc(a.tmux.target)}"
+           title="Model (the pet's colour) — click to switch model">${esc(model.label)}</button>`
+         : `<span class="model-tag" title="Model — the pet's colour">${esc(model.label)}</span>`}
       </div>
+      <div class="lcd-dir" title="Working directory: ${esc(a.cwd)}">${esc(a.cwd)}</div>
       <div class="tama-mid">
         <div class="tama-stats">
           ${ctx ? `<div class="stat-big ${ctx.level}" title="Context window used: ${ctx.label}. Higher = closer to compacting.">
@@ -510,9 +547,12 @@ function cardHtml(a) {
       <div class="mood-pill ${esc(a.state)}" title="${esc(mood)}">${esc(mood)}</div>
       ${approvalActionsHtml(a)}
     </div>
-    <div class="tama-buttons" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div class="tama-buttons">
+      <span class="led st-${esc(a.state)}" title="Status light: ${STATE_LABEL[a.state] || ""}"></span>
+      <span class="led ctx-${ctx ? ctx.level : "off"}" title="Context light: ${ctx ? `${ctx.label} used (${ctx.pct}%)` : "no data yet"}"></span>
+      <span class="led led-repo" title="Family light: same colour = same repo"></span>
+    </div>
     <div class="shell-meta">
-      <div title="Working directory"><b>dir</b> ${esc(a.cwd)}</div>
       ${a.git ? `<div title="git repository · branch @ commit"><b>git</b> ${esc(a.git.repo)} · ${esc(a.git.branch)} @ ${esc(a.git.commit)}</div>` : ""}
       <div title="Session started ${esc(whenAbs(a.startedAt))} — id ${esc(a.sessionId)}">
         <b>born</b> ${ago(a.startedAt)} <span class="sid">#${esc((a.sessionId || "").slice(0, 8))}</span></div>
@@ -817,6 +857,7 @@ function wireComposer() {
 function renderModal() {
   const a = currentAgent();
   if (!a) { closeModal(); return; }
+  if (markSeen(a)) saveSeen();  // the card is open — count it all as seen
   if (modal.dataset.sid !== a.sessionId) {
     modal.dataset.sid = a.sessionId;
     modal.innerHTML = `<div class="modal-head"></div><div class="tabbar"></div>
@@ -874,10 +915,13 @@ function render() {
     .filter(([, n]) => n)
     .map(([s, n]) => `<span class="stat ${s}"><span class="dot ${s}"></span><b>${n}</b> ${STATE_LABEL[s]}</span>`)
     .join("");
+  if (grid.querySelector(".model-pick")) return;  // don't yank an open picker
   grid.innerHTML = agents.length
     ? GROUPS.map(g => {
         const list = agents.filter(a => g.states.includes(a.state));
         if (!list.length) return "";
+        if (g.id === "idle" || g.id === "waiting")  // most recent reply first
+          list.sort((x, y) => (y.transcript_mtime || 0) - (x.transcript_mtime || 0));
         return `<div class="group-head ${g.id}">
             <span class="group-label">${g.label}</span>
             <span class="group-count">${list.length}</span>
@@ -893,10 +937,32 @@ function render() {
 document.getElementById("legend").innerHTML = legendHtml();
 // the brand mark is a resident pet: clay Claude wearing the crown
 document.querySelector(".brand-mark").innerHTML =
-  mascotSvg({state: "busy", cwd: "brand", sessionId: "brand", git: {repo: "brand"}});
+  mascotSvg({state: "busy", cwd: "brand", sessionId: "brand", git: {repo: "r5"},
+             context_breakdown: {model: "clay"}});
 
 function focusTmux(target) {
   post("/api/focus", {target});
+}
+
+/* Click the model pill → pick a model → the server types `/model <id>` into
+   that session. The pill (and pet colour) update after the next reply. */
+const MODEL_IDS = {Fable: "claude-fable-5", Opus: "claude-opus-5",
+                   Sonnet: "claude-sonnet-5", Haiku: "claude-haiku-4-5"};
+
+function openModelPick(btn) {
+  const sel = document.createElement("select");
+  sel.className = "model-pick";
+  sel.innerHTML = `<option value="">model…</option>` +
+    Object.entries(MODEL_IDS).map(([l, id]) => `<option value="${id}">${l}</option>`).join("");
+  btn.replaceWith(sel);
+  sel.focus();
+  const done = () => { if (sel.isConnected) sel.replaceWith(btn); };
+  sel.addEventListener("click", e => e.stopPropagation());
+  sel.addEventListener("change", async () => {
+    if (sel.value) await post("/api/model", {target: btn.dataset.target, model: sel.value});
+    done();
+  });
+  sel.addEventListener("blur", done);
 }
 
 async function killAgent(btn) {
@@ -945,6 +1011,12 @@ document.body.addEventListener("click", e => {
     startRename();
     return;
   }
+  const mp = e.target.closest(".model-tag");
+  if (mp && mp.dataset.target) {
+    e.stopPropagation();
+    openModelPick(mp);
+    return;
+  }
   if (e.target.closest(".modal-close") || e.target === overlay) {
     closeModal();
     return;
@@ -971,11 +1043,30 @@ const spawnCwd = document.getElementById("spawn-cwd");
 const spawnName = document.getElementById("spawn-name");
 const spawnPrompt = document.getElementById("spawn-prompt");
 const spawnStatus = document.getElementById("spawn-status");
+const spawnResume = document.getElementById("spawn-resume");
+
+/* Fill the resume dropdown with past conversations found in the chosen folder. */
+async function loadResumable() {
+  const cwd = spawnCwd.value.trim();
+  spawnResume.innerHTML = `<option value="">start a fresh session</option>`;
+  if (!cwd) return;
+  try {
+    const res = await fetch(`/api/sessions?cwd=${encodeURIComponent(cwd)}`,
+      {headers: authHeaders()});
+    const d = await res.json();
+    for (const s of d.sessions || []) {
+      const label = `${s.title || "#" + s.sid.slice(0, 8)} · ${ago(s.mtime)}${s.live ? " · LIVE" : ""}`;
+      spawnResume.insertAdjacentHTML("beforeend",
+        `<option value="${esc(s.sid)}" ${s.live ? "disabled" : ""}>${esc(label)}</option>`);
+    }
+  } catch { /* dropdown just stays "fresh" */ }
+}
 
 function openSpawn() {
   spawnStatus.textContent = "";
   spawnOverlay.classList.remove("hidden");
   if (!spawnCwd.value) spawnCwd.value = spawnDir;
+  loadResumable();
   spawnCwd.focus();
 }
 function closeSpawn() { spawnOverlay.classList.add("hidden"); }
@@ -986,10 +1077,12 @@ async function doSpawn() {
   spawnStatus.textContent = "launching…";
   spawnStatus.className = "composer-status";
   const ok = await post("/api/spawn",
-    {cwd, name: spawnName.value, prompt: spawnPrompt.value});
+    {cwd, name: spawnName.value, prompt: spawnPrompt.value,
+     resume: spawnResume.value});
   if (ok) {
     spawnName.value = "";
     spawnPrompt.value = "";
+    spawnResume.value = "";
     closeSpawn();
     tick();
   } else {
@@ -1003,6 +1096,7 @@ document.getElementById("spawn-cancel").addEventListener("click", closeSpawn);
 document.getElementById("spawn-go").addEventListener("click", doSpawn);
 spawnOverlay.addEventListener("click", e => { if (e.target === spawnOverlay) closeSpawn(); });
 spawnCwd.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); spawnName.focus(); } });
+spawnCwd.addEventListener("change", loadResumable);
 spawnName.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); spawnPrompt.focus(); } });
 
 async function tick() {
@@ -1016,6 +1110,16 @@ async function tick() {
     const data = await res.json();
     agents = data.agents || [];
     spawnDir = data.spawn_dir || spawnDir;
+    if (!seenReady) {  // first visit ever: baseline, so nothing screams "new"
+      agents.forEach(markSeen);
+      seenReady = true;
+      saveSeen();
+    }
+    if (Object.keys(seen).length > 300) {  // prune marks of long-gone sessions
+      const live = new Set(agents.map(a => a.sessionId));
+      seen = Object.fromEntries(Object.entries(seen).filter(([k]) => live.has(k)));
+      saveSeen();
+    }
     const key = JSON.stringify(agents) + openSid;
     if (key !== lastPayload) {
       lastPayload = key;
