@@ -862,10 +862,10 @@ ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "y", "n"}
 
 def send_key(target, key):
     """Send a single key (answer permission prompts, interrupt, ...)."""
+    if key not in ALLOWED_KEYS:  # cheap check first, and a truthful error
+        return False, "key not allowed"
     if not valid_pane(target):
         return False, "unknown pane"
-    if key not in ALLOWED_KEYS:
-        return False, "key not allowed"
     try:
         subprocess.run(["tmux", "send-keys", "-t", target, key],
                        timeout=5, check=True)

@@ -2,8 +2,18 @@
 
 A little web dashboard for keeping an eye on several Claude Code agents at once —
 styled as a shelf of Tamagotchi-like handhelds, one pixel-Claude pet per session.
-Pet colour = model, outfit = repo (agents in the same repo dress alike), and the
-mood pill + face track what the agent is doing right now.
+
+Each pet's look encodes where it lives, so you can read the fleet at a glance:
+
+| what you see | what it means |
+|---|---|
+| body colour | the model (Fable / Opus / Sonnet / Haiku) |
+| hat | the git repo — repo-mates wear the same hat and share the device tint |
+| held item | the directory — same repo, different folder = different item |
+| an egg instead of a pet | the session hasn't replied yet, so its model is unknown |
+
+The mood pill, the pet's eyes and the three device lights track what the agent
+is doing right now.
 
 I usually have a handful of Claude Code sessions running in tmux, each in its own
 window, and I kept losing track of which ones were stuck waiting on me. So this

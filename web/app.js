@@ -79,9 +79,8 @@ function fmtDuration(ts) {
 }
 
 /* ---------- pixel mascot (a little Tamagotchi Claude per session) ----------
-   Body colour = model family (see legend). Hat + accent = deterministic from the
-   repo (or dir) so agents that share a repo look like a family. Face = live
-   state, so the pet's mood tracks what the agent is doing. */
+   Every visual axis encodes something: colour = model, hat = git repo,
+   held item = directory, and the eyes/zzz follow the live state. */
 
 /* Monokai-pastel skins; "other" keeps the authentic clay Claude. */
 const MODEL_SKIN = {
@@ -111,21 +110,30 @@ function hashStr(s) {
   return h >>> 0;
 }
 
-// Fantasy kit (hat/held item) picked deterministically per repo, tinted by ACCENT.
-const KITS = ["king", "knight", "princess", "wizard", "fairy", "mage", "guardian", "warrior"];
+/* Three independent axes, so a pet's look tells you where it lives:
+     body colour = model   ·   HAT = git repo   ·   HELD ITEM = directory
+   Two agents in one repo wear the same hat; if they sit in different
+   subfolders they carry different items. Same repo AND folder = twins.
+   The device tint follows the repo too, so repo-mates read as a family. */
+const HAT_NAMES = ["crown", "helm", "hennin", "wizard", "halo", "flowers", "horns", "bow"];
+const ITEM_NAMES = ["sword", "shield", "wand", "staff", "book", "lantern", "potion", "banner"];
 const ACCENTS = ["#ffd866", "#ff6188", "#78dce8", "#ab9df2", "#fc9867", "#a9dc76", "#8fb8ff", "#ffa7c4"];
 
 function critterOf(a) {
   const model = (a.context_breakdown || {}).model;
   const skin = MODEL_SKIN[modelFamily(model)];
-  const key = a.git?.repo ? "repo:" + a.git.repo : "dir:" + (a.cwd || a.sessionId);
-  const h = hashStr(key);
-  return {skin, kit: KITS[h % KITS.length], accent: ACCENTS[(h >> 5) % ACCENTS.length]};
+  const dir = a.cwd || a.sessionId || "";
+  const rh = hashStr(a.git?.repo ? "repo:" + a.git.repo : "dir:" + dir);
+  const dh = hashStr("dir:" + dir);
+  return {skin,
+          hat: HAT_NAMES[rh % HAT_NAMES.length],
+          item: ITEM_NAMES[dh % ITEM_NAMES.length],
+          accent: ACCENTS[(rh >>> 5) % ACCENTS.length]};  // >>> : >> goes negative past 2^31
 }
 
 /* The pet IS the Claude Code creature: one big rectangle, two little arm nubs
    just below the middle, four stubby legs, and fixed rectangular pupils.
-   Body colour = model, kit = repo. 18 wide × 16 tall grid. */
+   18 wide × 16 tall grid. */
 const CREATURE = (() => {
   const c = [];
   for (let y = 4; y <= 11; y++) for (let x = 3; x <= 14; x++) {
@@ -157,32 +165,48 @@ const EGG = (() => {
 })();
 const EGG_SPECKLES = [[8,3,"W"],[6,8,"W"],[11,5,"W"],[9,10,"W"]];
 
-// Kits: [x, y, role] — G gold, S steel, W white, D wood, A repo accent.
-// Hats live in rows 0–3; held items attach at the arms (rows 7–8).
-const KIT = {
-  king:    [[5,2,"G"],[8,2,"G"],[11,2,"G"],
+// Sprites: [x, y, role] — G gold, S steel, W white/bone, D wood, A repo accent.
+// Hats sit in rows 0-3 above the head; items are held at the arms (rows 0-9,
+// x0-2 left / x15-17 right) so the two axes can never collide.
+const HAT = {
+  crown:   [[5,2,"G"],[8,2,"G"],[11,2,"G"],
             [5,3,"G"],[6,3,"G"],[7,3,"A"],[8,3,"G"],[9,3,"G"],[10,3,"A"],[11,3,"G"],[12,3,"G"]],
-  knight:  [[8,0,"A"],[8,1,"A"],[9,1,"A"],
+  helm:    [[8,0,"A"],[8,1,"A"],[9,1,"A"],
             [5,2,"S"],[6,2,"S"],[7,2,"S"],[8,2,"S"],[9,2,"S"],[10,2,"S"],[11,2,"S"],[12,2,"S"],
             [5,3,"S"],[6,3,"S"],[11,3,"S"],[12,3,"S"]],
-  princess:[[10,0,"A"],[9,1,"A"],[10,1,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
+  hennin:  [[10,0,"A"],[9,1,"A"],[10,1,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
             [8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],
-            [11,0,"W"],[12,1,"W"],[13,2,"W"]],                        // hennin + veil
+            [11,0,"W"],[12,1,"W"],[13,2,"W"]],                      // cone + veil
   wizard:  [[8,0,"G"],[8,1,"A"],[9,1,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],
-            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"],
-            [16,3,"G"],[16,4,"D"],[16,5,"D"],[16,6,"D"],[15,2,"A"],[17,2,"A"]],  // + wand in hand
-  fairy:   [[2,3,"W"],[1,4,"W"],[2,4,"W"],[0,5,"W"],[1,5,"A"],[2,5,"W"],[1,6,"W"],[2,6,"A"],
-            [15,3,"W"],[15,4,"W"],[16,4,"W"],[17,5,"W"],[16,5,"A"],[15,5,"W"],[16,6,"W"],[15,6,"A"],
-            [9,0,"G"],[8,1,"G"],[10,1,"G"],[9,2,"G"]],  // big wings + a little sparkle halo
-  mage:    [[1,2,"A"],[0,1,"G"],[2,1,"G"],[1,3,"D"],[1,4,"D"],[1,5,"D"],[1,6,"D"]],  // orb staff
-  guardian:[[16,5,"S"],[17,5,"S"],[16,6,"S"],[17,6,"S"],[16,7,"A"],[17,7,"A"],
-            [16,8,"S"],[17,8,"S"],[16,9,"S"],[17,9,"S"],[16,10,"S"],[17,10,"S"]],  // shield
-  warrior: [[16,0,"W"],[16,1,"S"],[16,2,"S"],[16,3,"S"],[16,4,"S"],[16,5,"S"],
-            [15,6,"G"],[16,6,"G"],[17,6,"G"]],                        // sword held high
+            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"]],
+  halo:    [[7,1,"G"],[8,1,"G"],[9,1,"G"],[10,1,"G"]],
+  flowers: [[5,3,"A"],[6,3,"W"],[7,3,"A"],[8,3,"W"],[9,3,"A"],[10,3,"W"],[11,3,"A"],[12,3,"W"],
+            [6,2,"A"],[9,2,"W"],[12,2,"A"]],
+  horns:   [[3,1,"W"],[4,2,"W"],[4,3,"W"],[14,1,"W"],[13,2,"W"],[13,3,"W"]],
+  bow:     [[7,1,"A"],[7,2,"A"],[10,1,"A"],[10,2,"A"],[8,2,"G"],[9,2,"G"],[8,3,"A"],[9,3,"A"]],
+};
+
+const ITEM = {
+  sword:   [[16,0,"W"],[16,1,"S"],[16,2,"S"],[16,3,"S"],[16,4,"S"],[16,5,"S"],
+            [15,6,"G"],[16,6,"G"],[17,6,"G"],[16,7,"D"]],
+  shield:  [[0,5,"S"],[1,5,"S"],[0,6,"S"],[1,6,"S"],[0,7,"S"],[1,7,"A"],
+            [0,8,"S"],[1,8,"S"],[0,9,"S"],[1,9,"S"]],               // off-hand
+  wand:    [[16,2,"G"],[15,3,"G"],[16,3,"G"],[17,3,"G"],
+            [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"]],
+  staff:   [[16,0,"A"],[15,1,"A"],[16,1,"A"],[17,1,"A"],[16,2,"A"],
+            [16,3,"D"],[16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
+  book:    [[16,5,"A"],[17,5,"A"],[16,6,"A"],[17,6,"W"],[16,7,"A"],[17,7,"W"],[16,8,"A"],[17,8,"W"]],
+  lantern: [[16,3,"D"],[16,4,"D"],
+            [15,5,"G"],[16,5,"G"],[17,5,"G"],[15,6,"G"],[16,6,"W"],[17,6,"G"],
+            [15,7,"G"],[16,7,"W"],[17,7,"G"],[15,8,"G"],[16,8,"G"],[17,8,"G"]],
+  potion:  [[16,3,"D"],[16,4,"W"],[16,5,"W"],
+            [16,6,"A"],[17,6,"A"],[16,7,"A"],[17,7,"A"],[16,8,"A"],[17,8,"A"]],
+  banner:  [[16,1,"D"],[16,2,"D"],[16,3,"D"],[16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"],
+            [17,1,"A"],[17,2,"A"],[17,3,"A"],[17,4,"A"]],
 };
 
 function mascotSvg(a, cls = "") {
-  const {skin, kit, accent} = critterOf(a);
+  const {skin, hat, item, accent} = critterOf(a);
   const px = [];
   const cell = (x, y, c) =>
     px.push(`<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${c}"/>`);
@@ -191,7 +215,8 @@ function mascotSvg(a, cls = "") {
     EGG_SPECKLES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
   } else {
     CREATURE.forEach(([x, y, r]) => cell(x, y, r === "T" ? skin.body : skin.outline));
-    (KIT[kit] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+    (HAT[hat] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+    (ITEM[item] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
   }
   EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
   if (a.state === "idle") ZZZ.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
@@ -201,7 +226,7 @@ function mascotSvg(a, cls = "") {
 }
 
 function legendHtml() {
-  return `<div class="legend" title="Pet colour = model. Egg = session hasn't replied yet, so its model isn't known.">
+  return `<div class="legend" title="Pet colour = model · hat = git repo · held item = folder. Egg = no reply yet, so the model is unknown.">
     ${MODEL_ORDER.map(k => `<span class="legend-item">
       <span class="legend-dot" style="background:${MODEL_SKIN[k].body}"></span>${MODEL_SKIN[k].label}</span>`).join("")}
   </div>`;
@@ -775,7 +800,8 @@ function composerHtml(a) {
   if (!a.tmux) {
     return `<div class="composer"><span class="composer-note">No tmux pane found — can't send input.</span></div>`;
   }
-  return `<div class="composer">
+  return `<div class="composer-grip" title="Drag to resize the reply box"></div>
+  <div class="composer">
     <textarea class="composer-input" rows="3"
       placeholder="Message ${esc(a.name)}…  (Enter to send, Shift+Enter for newline)"></textarea>
     <button class="send-btn">Send</button>
@@ -859,10 +885,27 @@ function wireComposer() {
   // remember however tall you dragged the reply box
   try { if (localStorage.tamaComposerH) input.style.height = localStorage.tamaComposerH; }
   catch { /* private mode */ }
-  new ResizeObserver(() => {
+  const saveH = () => {
     try { localStorage.tamaComposerH = input.style.height || input.offsetHeight + "px"; }
     catch { /* private mode */ }
-  }).observe(input);
+  };
+  input.addEventListener("mouseup", saveH);  // native corner grip
+  // explicit drag bar: dragging up grows the box, down shrinks it
+  modal.querySelector(".composer-grip")?.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    const startY = e.clientY, startH = input.offsetHeight;
+    const move = ev => {
+      input.style.height =
+        Math.max(56, Math.min(innerHeight * 0.75, startH + startY - ev.clientY)) + "px";
+    };
+    const stop = () => {
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", stop);
+      saveH();
+    };
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", stop);
+  });
   input.addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -975,10 +1018,10 @@ themeBtn.addEventListener("click", () => {
 applyTheme();
 
 document.getElementById("legend").innerHTML = legendHtml();
-// the brand mark is a resident pet: clay Claude wearing the crown
+// the brand mark is a resident pet: crowned clay Claude with a sword
 document.querySelector(".brand-mark").innerHTML =
-  mascotSvg({state: "busy", cwd: "brand", sessionId: "brand", git: {repo: "r5"},
-             context_breakdown: {model: "clay"}});
+  mascotSvg({state: "busy", sessionId: "brand", cwd: "/D1",
+             git: {repo: "R5"}, context_breakdown: {model: "clay"}});
 
 function focusTmux(target) {
   post("/api/focus", {target});

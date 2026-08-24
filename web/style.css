@@ -502,7 +502,11 @@ main {
   transition: border-color .13s ease, color .13s ease;
 }
 .btn-ghost:hover { color: var(--ink); border-color: var(--muted); }
-.modal-body { overflow-y: auto; padding: 2px 20px 20px; }
+/* flex:1 + min-height:0 is what makes the composer resizable: without
+   min-height:0 a flex item refuses to shrink below its content, so the
+   modal (capped at 92vh, overflow hidden) had no room to give and the
+   textarea's drag did nothing. */
+.modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 2px 20px 20px; }
 
 /* ---------- tabs ---------- */
 .tabbar { display: flex; flex-wrap: wrap; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--hairline); flex-shrink: 0; }
@@ -551,6 +555,25 @@ main {
   flex-shrink: 0;
 }
 .composer-note { color: var(--muted); font-size: 12.5px; }
+/* the grab bar above the reply box — the discoverable way to resize it */
+.composer-grip {
+  flex-shrink: 0;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  border-top: 1px solid var(--hairline);
+  background: var(--surface-2);
+  touch-action: none;        /* let pointer drags through on touch devices */
+}
+.composer-grip::before {
+  content: "";
+  width: 52px; height: 4px; border-radius: 2px;
+  background: color-mix(in srgb, var(--ink) 25%, transparent);
+}
+.composer-grip:hover::before { background: var(--accent); }
+.composer-grip + .composer { border-top: none; }  /* grip already draws the rule */
 .composer-input {
   flex: 1;
   resize: vertical;          /* drag the corner to grow the reply box */
