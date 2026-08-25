@@ -13,6 +13,7 @@ Stdlib only. Run: python3 server.py [--port 8842] [--host 127.0.0.1]
 """
 
 import argparse
+import datetime
 import hmac
 import json
 import os
@@ -102,6 +103,16 @@ def context_window_for(model, ctx_tokens):
     if (ctx_tokens or 0) > 200_000:
         window = max(window, 1_000_000)
     return window
+
+
+def iso_to_epoch(ts):
+    """'2026-08-18T10:27:34.598Z' -> epoch seconds, or None."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def pid_alive(pid):
@@ -231,7 +242,7 @@ def tail_transcript(cwd, session_id):
     info = {"last_assistant": None, "last_prompt": None, "title": None,
             "mtime": None, "context_tokens": None, "context_window": None,
             "context_breakdown": None, "permission_mode": None,
-            "pending_tool": None}
+            "pending_tool": None, "last_activity": None}
     if not os.path.exists(path):
         return info
     mtime = os.path.getmtime(path)
@@ -253,12 +264,19 @@ def tail_transcript(cwd, session_id):
         info["title"] = transcript_title(path)
     for line in reversed(lines):
         if (info["last_assistant"] and info["last_prompt"] and info["title"]
-                and info["permission_mode"]):
+                and info["permission_mode"] and info["last_activity"]):
             break
         try:
             rec = json.loads(line)
         except Exception:
             continue
+        # Newest record that carries a real timestamp = when this conversation
+        # last actually moved. The file's own mtime does NOT mean that: Claude
+        # Code rewrites bookkeeping records (last-prompt, ai-title, mode,
+        # permission-mode — none of them timestamped) long after the last
+        # exchange, which floated week-old sessions to the top of the board.
+        if info["last_activity"] is None and rec.get("timestamp"):
+            info["last_activity"] = iso_to_epoch(rec["timestamp"])
         t = rec.get("type")
         if t == "assistant":
             msg = rec.get("message") or {}
@@ -616,12 +634,43 @@ def detect_prompt(lines):
             "options": [{"key": k, "label": opts[k]} for k in keys]}
 
 
+# Footer text → permission mode, most specific first ("accept edits on" must be
+# tested before the looser bypass check).
+_MODE_FOOTERS = (("accept edits on", "acceptEdits"),
+                 ("plan mode on", "plan"),
+                 ("auto mode on", "auto"),
+                 ("manual mode on", "default"))
+FOOTER_SCAN_LINES = 5
+
+
+def footer_mode(lines):
+    """Permission mode from the pane's status footer, or None.
+
+    The footer is NOT reliably the last line: Claude Code renders extra rows
+    under it — "new task? /clear to save 488.4k tokens" once a session has used
+    a lot of context, an attached-file indicator, and so on. Reading only
+    lines[-1] therefore returned None on exactly the long-running sessions you
+    most want to retune, and /api/mode refused with "can't read the permission
+    mode from the pane".
+
+    Scanning bottom-up over the last few rows keeps the anti-spoofing property
+    that motivated the original single-line rule — the real footer always sits
+    below the conversation, so it is always reached first."""
+    for ln in reversed(lines[-FOOTER_SCAN_LINES:]):
+        low = ln.lower()
+        for needle, mode in _MODE_FOOTERS:
+            if needle in low:
+                return mode
+        if "bypass" in low and " on" in low:
+            return "bypassPermissions"
+    return None
+
+
 def pane_status(target):
     """One pane capture → the live permission mode and the activity line.
 
-    Mode is the bottom status line ('⏵⏵ auto mode on · …'). Activity is the
-    spinner line while the agent works ('✽ Ideating… (1m 39s · ↓ 6.2k tokens)').
-    Only the bottom line is used for mode so conversation text can't spoof it."""
+    Mode comes from the bottom status footer ('⏵⏵ auto mode on · …'). Activity
+    is the spinner line while the agent works ('✽ Ideating… (1m 39s · ↓ 6.2k)')."""
     result = {"mode": None, "activity": None, "working": None, "prompt": None}
     if not target:
         return result
@@ -630,17 +679,7 @@ def pane_status(target):
     if not lines:
         return result
     result["working"] = False
-    footer = lines[-1].lower()
-    if "accept edits on" in footer:
-        result["mode"] = "acceptEdits"
-    elif "plan mode on" in footer:
-        result["mode"] = "plan"
-    elif "auto mode on" in footer:
-        result["mode"] = "auto"
-    elif "manual mode on" in footer:
-        result["mode"] = "default"
-    elif "bypass" in footer and " on" in footer:
-        result["mode"] = "bypassPermissions"
+    result["mode"] = footer_mode(lines)
     for ln in lines:
         m = _ACTIVITY_RE.search(ln)
         if m:
@@ -790,7 +829,10 @@ def build_agent(reg, pid_to_pane, names=None):
                      for i in sorted(i for i in (lu_i, la_i) if i is not None)]
     pstatus = pane_status(pane["target"]) if pane else {
         "mode": None, "activity": None, "working": None, "prompt": None}
-    state = derive_state(reg.get("status"), last_event, tinfo["mtime"],
+    # When the conversation last actually moved. Falls back to the file mtime
+    # only when nothing in the tail carried a timestamp.
+    last_activity = tinfo["last_activity"] or tinfo["mtime"]
+    state = derive_state(reg.get("status"), last_event, last_activity,
                          pstatus["working"], pstatus["prompt"])
     notif_msg = None
     if last_event and last_event.get("event") == "notification" and state in ("needs_input", "waiting"):
@@ -836,6 +878,7 @@ def build_agent(reg, pid_to_pane, names=None):
         "last_prompt": last_user or tinfo["last_prompt"],
         "last_exchange": last_exchange,
         "transcript_mtime": tinfo["mtime"],
+        "last_activity": last_activity,
         "context_tokens": ctx_tokens,
         "context_window": ctx_window if ctx_tokens else None,
         "context_breakdown": tinfo["context_breakdown"],
@@ -1018,7 +1061,10 @@ def set_mode(target, mode):
         return False, "answer the approval prompt first"
     if not st["mode"]:
         return False, "can't read the permission mode from the pane"
-    for _ in range(len(CYCLE_MODES) + 1):
+    # At most one full lap: any mode in the cycle is reachable in fewer presses
+    # than that, and stopping there means a failed switch leaves the session on
+    # the mode it started in rather than somewhere arbitrary.
+    for _ in range(len(CYCLE_MODES)):
         if st["mode"] == mode:
             _cache["t"] = 0.0  # reflect the new mode on the next poll
             return True, mode
@@ -1029,7 +1075,10 @@ def set_mode(target, mode):
             return False, str(e)
         time.sleep(0.35)  # let the CLI redraw its footer before we re-read it
         st = pane_status(target)
-    return False, f"mode not in this session's cycle (stopped at {st['mode']})"
+    if st["mode"] == mode:
+        _cache["t"] = 0.0
+        return True, mode
+    return False, f"'{mode}' is not in this session's ⇧⇥ cycle (back at {st['mode']})"
 
 
 ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "4", "y", "n"}

@@ -21,14 +21,14 @@ try { seen = JSON.parse(localStorage.tamaSeen || "{}"); } catch { /* fresh */ }
 let seenReady = (() => { try { return "tamaSeen" in localStorage; } catch { return true; } })();
 function saveSeen() { try { localStorage.tamaSeen = JSON.stringify(seen); } catch { /* ignore */ } }
 function markSeen(a) {  // true when the mark actually moved (caller then saves)
-  if (!a || !a.transcript_mtime || seen[a.sessionId] === a.transcript_mtime) return false;
-  seen[a.sessionId] = a.transcript_mtime;
+  if (!a || !a.last_activity || seen[a.sessionId] === a.last_activity) return false;
+  seen[a.sessionId] = a.last_activity;
   return true;
 }
 function hasNew(a) {
-  if (a.state === "busy" || a.state === "needs_input" || !a.transcript_mtime) return false;
+  if (a.state === "busy" || a.state === "needs_input" || !a.last_activity) return false;
   const s = seen[a.sessionId];
-  return s === undefined || a.transcript_mtime > s + 2;
+  return s === undefined || a.last_activity > s + 2;
 }
 
 const STATE_LABEL = {
@@ -673,7 +673,7 @@ function cardHtml(a) {
         : `<span class="mode-chip" title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>`) : ""}
       ${a.tmux ? `<span class="tmux-tag"
          title="Lives in tmux ${esc(a.tmux.target)} = session:window.pane">${esc(a.tmux.target)}</span>` : ""}
-      <span class="time" title="Last activity">${ago(a.transcript_mtime)}</span>
+      <span class="time" title="Last message in this conversation">${ago(a.last_activity)}</span>
     </div>
   </div>`;
 }
@@ -796,7 +796,7 @@ function detailsSectionHtml(a) {
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
     ["Born", a.startedAt ? `${whenAbs(a.startedAt)} (${ago(a.startedAt)})` : "–"],
     ["Runtime", fmtDuration(a.startedAt)],
-    ["Last activity", ago(a.transcript_mtime)],
+    ["Last activity", ago(a.last_activity)],
     ["Transcript", a.transcript || "—"],
     ["Scratchpad", a.scratchpad || "— (none yet)"],
     ["pid", a.pid],
@@ -1225,8 +1225,13 @@ function render() {
       ? GROUPS.map(g => {
           const list = agents.filter(a => g.states.includes(a.state));
           if (!list.length) return "";
-          if (g.id === "idle" || g.id === "waiting")  // most recent reply first
-            list.sort((x, y) => (y.transcript_mtime || 0) - (x.transcript_mtime || 0));
+          // Most recent exchange first. Sorted on last_activity (the newest
+          // timestamped record) rather than the transcript's file mtime, which
+          // Claude Code bumps on week-old conversations for its own bookkeeping
+          // and which therefore ordered the board almost at random.
+          // "Working" stays alphabetical so busy cards don't reshuffle each tick.
+          if (g.id !== "working")
+            list.sort((x, y) => (y.last_activity || 0) - (x.last_activity || 0));
           return `<div class="group-head ${g.id}">
               <span class="group-label">${g.label}</span>
               <span class="group-count">${list.length}</span>
