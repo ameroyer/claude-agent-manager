@@ -253,7 +253,7 @@ main {
 }
 
 /* approval actions */
-.approve-row { margin-top: 12px; display: flex; gap: 7px; }
+.approve-row { margin-top: 12px; display: flex; gap: 7px; flex-wrap: wrap; }
 .key-btn {
   font: 600 12px var(--sans);
   border-radius: 8px;
@@ -790,14 +790,6 @@ main {
 .tasklist li.in_progress { color: var(--ink); }
 .tasklist li.in_progress .ico { color: var(--accent); }
 
-/* ---------- todo.md ---------- */
-.todo-md { font-size: 13px; color: var(--ink-2); background: var(--surface-2); border-radius: var(--r-inset); padding: 13px 15px; }
-.todo-md h1, .todo-md h2, .todo-md h3 { font-size: 13px; color: var(--ink); margin: 10px 0 4px; }
-.todo-md h1:first-child, .todo-md h2:first-child { margin-top: 0; }
-.todo-md ul { margin: 2px 0; padding-left: 18px; }
-.todo-md li.done { color: var(--muted); text-decoration: line-through; }
-.todo-md p { margin: 4px 0; }
-
 /* ===================================================================
    TamaClaudchi — the device layer
    Every card is a handheld: dark olive shell, sage LCD, three buttons.
@@ -961,8 +953,56 @@ button.model-tag:hover { background: var(--lcd); }
 .mood-pill.needs_input { background: #ffdce6; color: #8e1140; }
 .mood-pill.waiting { background: #ffedc0; color: #6e5200; }
 
+/* a session another agent (or the dashboard) launched — deliberately quieter
+   than a top-level agent, so the shelf reads parent-first */
+.card.child {
+  background: var(--surface-2);
+  box-shadow: none;
+  border-style: dashed;
+}
+.card.child .tama-shell, .card.child .tama-screen { filter: saturate(.8); }
+.card.child:hover { box-shadow: var(--shadow-card); }
+.lineage { font-style: italic; }
+
+/* sub-agents: spawned inside a session, shown on its own card */
+.subagents { display: flex; align-items: center; gap: 5px; margin-top: 7px; flex-wrap: wrap; }
+.sub-label {
+  font: 800 8.5px var(--mono); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--lcd-dim);
+}
+.sub-chip {
+  font: 700 9.5px var(--mono);
+  padding: 1px 6px; border-radius: 5px;
+  background: var(--lcd-hi); color: var(--lcd-ink);
+  border: 1px solid color-mix(in srgb, var(--lcd-ink) 30%, transparent);
+  white-space: nowrap; opacity: .62;
+}
+.sub-chip.live {
+  opacity: 1;
+  border-color: var(--pet-accent);
+  background: color-mix(in srgb, var(--pet-accent) 26%, var(--lcd-hi));
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* sub-agent list in the modal */
+.sub-list { display: flex; flex-direction: column; gap: 6px; }
+.sub-row {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px;
+  align-items: center; font-size: 12.5px; color: var(--ink-2);
+}
+.sub-row .sub-chip {
+  background: var(--surface-2); color: var(--ink-2);
+  border-color: var(--border); opacity: 1;
+}
+.sub-row.live .sub-chip {
+  color: var(--accent); border-color: var(--accent); animation: none;
+}
+.sub-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-state { font: 11px var(--mono); color: var(--muted); }
+.sub-row.live .sub-state { color: var(--accent); }
+
 /* approve controls — chunky pixel keys on the LCD */
-.tama-screen .approve-row { margin-top: 8px; display: flex; gap: 8px; }
+.tama-screen .approve-row { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
 .tama-screen .key-btn {
   font: 700 11.5px var(--mono);
   border-radius: 8px; border: 2px solid var(--shell-edge);
@@ -1038,24 +1078,18 @@ button.model-tag:hover { background: var(--lcd); }
 
 
 /* ---------- artifacts tab ---------- */
-.art-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-.art-pick, .art-add {
+.art-bar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 12px 0 10px; }
+.art-add {
+  flex: 1; min-width: 220px;
   font: 12px var(--mono); color: var(--ink);
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: var(--r-inset); padding: 6px 9px; outline: none;
 }
-.art-pick { max-width: 340px; }
-.art-add { flex: 1; min-width: 180px; }
 .art-add:focus { border-color: var(--accent); }
-.art-one { font: 600 12px var(--mono); color: var(--ink); }
-.art-count { font: 11px var(--mono); }
 .art-pin-btn {
   font: 650 12px var(--sans); color: var(--accent-ink); background: var(--accent);
   border: none; border-radius: var(--r-inset); padding: 6px 14px; cursor: pointer;
 }
-.art-path { font: 10.5px var(--mono); color: var(--muted); margin-bottom: 8px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
-.art-body { background: var(--surface-2); border-radius: var(--r-inset); padding: 13px 15px; }
 .art-body .md { color: var(--ink-2); font-size: 13px; }
 .art-sources { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 12px; font: 11px var(--mono); }
@@ -1070,4 +1104,23 @@ button.model-tag:hover { background: var(--lcd); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }
+}
+
+/* ---------- artifacts: one collapsible row per file ---------- */
+.art-list { display: flex; flex-direction: column; gap: 6px; }
+.art-item { border: 1px solid var(--border); border-radius: var(--r-inset); overflow: hidden; }
+.art-item.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.art-head {
+  width: 100%; display: flex; align-items: baseline; gap: 9px;
+  padding: 9px 12px; cursor: pointer; text-align: left;
+  background: var(--surface-2); border: 0; color: var(--ink);
+  font: 600 13px var(--sans);
+}
+.art-head:hover { background: var(--surface-3); }
+.art-caret { color: var(--muted); font-size: 11px; width: 9px; flex-shrink: 0; }
+.art-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-meta { margin-left: auto; font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+.art-body {
+  padding: 12px 14px; border-top: 1px solid var(--hairline);
+  max-height: 460px; overflow: auto;
 }

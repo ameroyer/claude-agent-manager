@@ -101,6 +101,15 @@ you restart them.
   what you see is what the CLI actually did. Bypass is left as a manual opt-in.
 - Spawn a new agent (pick a folder + optional first message), resume a past
   conversation from that folder (`claude --resume`), or kill one.
+- See where a session came from. A session another agent launched (or one you
+  started with **+ New agent**) is drawn quieter and says who launched it, and
+  the launcher lists what it spawned. tmux daemonises, so `/proc` can't answer
+  this — it comes from the parent's own transcript plus the dashboard's spawn
+  log (`~/.claude/agent-manager-spawns.json`).
+- See sub-agents a session spawned with the Task tool. Those run *inside* the
+  parent process — no pid, no pane, no transcript of their own — so they never
+  get a pet; they show as chips on the parent's card, live ones from the pane's
+  agent roster and finished ones from the transcript.
 - If a session ever fails to show up on the board, open `/api/debug?token=…` —
   it lists every tmux-pane process and registry entry with the checks each one
   passed, which pinpoints why it was filtered out.

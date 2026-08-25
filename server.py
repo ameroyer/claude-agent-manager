@@ -36,6 +36,7 @@ EVENTS_DIR = os.path.join(CLAUDE_DIR, "agent-events")
 STATUS_DIR = os.path.join(CLAUDE_DIR, "agent-status")
 NAMES_FILE = os.path.join(CLAUDE_DIR, "agent-manager-names.json")
 ARTIFACTS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-artifacts.json")
+SPAWNS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-spawns.json")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
@@ -43,6 +44,12 @@ CHAT_TAIL_BYTES = 2 * 1024 * 1024
 CHAT_MAX_MESSAGES = 150
 CHAT_MAX_CHARS = 20000
 THINK_MAX_CHARS = 8000
+# Card/Overview preview of the latest turn. The full conversation is served
+# separately by /api/chat, so this only has to be enough to read at a glance.
+EXCHANGE_PREVIEW_CHARS = 2000
+# Upper bound on a request body. Every endpoint takes a small JSON object; the
+# largest realistic payload is a typed message.
+MAX_BODY_BYTES = 1024 * 1024
 
 
 def run(cmd):
@@ -163,26 +170,24 @@ def load_tasks(session_id):
 
 
 def load_events(session_id):
-    """Return (state_override, last_notification_message, events_tail)."""
+    """Most recent hook event for a session, or None."""
     path = os.path.join(EVENTS_DIR, f"{session_id}.jsonl")
     if not os.path.exists(path):
-        return None, None
+        return None
     try:
         with open(path, "rb") as f:
             f.seek(max(0, os.path.getsize(path) - 16384))
             lines = f.read().decode("utf-8", "replace").splitlines()
     except Exception:
-        return None, None
-    last = None
+        return None
     for line in reversed(lines):
         try:
             ev = json.loads(line)
-            if "event" in ev:
-                last = ev
-                break
         except Exception:
             continue
-    return last, path
+        if "event" in ev:
+            return ev
+    return None
 
 
 def transcript_path(cwd, session_id):
@@ -240,9 +245,10 @@ def tail_transcript(cwd, session_id):
     Cached by transcript mtime so a fast poll doesn't re-read the tail."""
     path = transcript_path(cwd, session_id)
     info = {"last_assistant": None, "last_prompt": None, "title": None,
-            "mtime": None, "context_tokens": None, "context_window": None,
-            "context_breakdown": None, "permission_mode": None,
-            "pending_tool": None, "last_activity": None}
+            "mtime": None, "context_tokens": None, "context_breakdown": None,
+            "permission_mode": None, "pending_tool": None, "last_activity": None,
+            "last_assistant_ts": None, "last_prompt_ts": None, "subagents": [],
+            "spawned": []}
     if not os.path.exists(path):
         return info
     mtime = os.path.getmtime(path)
@@ -297,7 +303,8 @@ def tail_transcript(cwd, session_id):
                 texts = [b.get("text", "") for b in content
                          if isinstance(b, dict) and b.get("type") == "text"]
                 if texts:
-                    info["last_assistant"] = " ".join(texts)[:600]
+                    info["last_assistant"] = " ".join(texts)[:EXCHANGE_PREVIEW_CHARS]
+                    info["last_assistant_ts"] = rec.get("timestamp")
         elif t == "user" and not info["last_prompt"]:
             content = (rec.get("message") or {}).get("content")
             if isinstance(content, list):  # some human turns are text-block lists
@@ -305,16 +312,18 @@ def tail_transcript(cwd, session_id):
                                     if isinstance(b, dict) and b.get("type") == "text")
             if isinstance(content, str) and content.strip() and \
                     not content.startswith("<") and "tool_result" not in line[:200]:
-                info["last_prompt"] = content[:300]
+                info["last_prompt"] = content[:EXCHANGE_PREVIEW_CHARS]
+                info["last_prompt_ts"] = rec.get("timestamp")
         elif t == "ai-title" and not info["title"]:
             info["title"] = rec.get("aiTitle") or rec.get("title")
         elif t == "last-prompt" and not info["last_prompt"]:
             p = rec.get("prompt") or rec.get("text")
             if p and p.strip():
-                info["last_prompt"] = p[:300]
+                info["last_prompt"] = p[:EXCHANGE_PREVIEW_CHARS]
         elif t == "permission-mode" and not info["permission_mode"]:
             info["permission_mode"] = rec.get("permissionMode")
-    info["pending_tool"] = find_pending_tool(lines)
+    (info["pending_tool"], info["subagents"],
+     info["spawned"]) = scan_tool_calls(lines)
     _tail_cache[session_id] = (mtime, info)
     return info
 
@@ -331,10 +340,28 @@ def _tool_detail(name, inp):
     return ""
 
 
-def find_pending_tool(lines):
-    """A tool_use with no matching tool_result is awaiting run/approval."""
-    uses = {}     # id -> (name, input)
-    resolved = set()
+SUBAGENT_TOOLS = ("Task", "Agent")
+# `tmux new-session -d -s foo -c /dir` / `tmux new -s foo`. A session an agent
+# launched this way is a real, independent Claude — it gets its own pane, its
+# own transcript and its own card — so this is how the board recovers who
+# started it.
+_NEW_SESSION_RE = re.compile(
+    r"""tmux\s+new(?:-session)?\b[^\n;|&]*?-s[=\s]\s*["']?([A-Za-z0-9_.-]+)""", re.X)
+MAX_SUBAGENTS = 6
+
+
+def scan_tool_calls(lines):
+    """One pass over the tail → (tool awaiting approval, sub-agents, tmux
+    sessions this agent launched).
+
+    A tool_use with no matching tool_result is still awaiting run/approval;
+    that same pairing tells us which sub-agents are still going.
+
+    Sub-agents run *inside* the parent process: they get no pid, no registry
+    entry, no tmux pane and no transcript of their own, so they can never be a
+    card on the board. The parent's transcript is the only place they exist,
+    which is why they are reported as part of the parent."""
+    uses, resolved = {}, set()
     for line in lines:
         try:
             rec = json.loads(line)
@@ -351,11 +378,24 @@ def find_pending_tool(lines):
                 uses[b.get("id")] = (b.get("name"), b.get("input"))
             elif t == "user" and b.get("type") == "tool_result":
                 resolved.add(b.get("tool_use_id"))
-    pending = [(tid, nv) for tid, nv in uses.items() if tid not in resolved]
-    if not pending:
-        return None
-    name, inp = pending[-1][1]
-    return {"name": name, "detail": _tool_detail(name, inp)}
+    spawned = []
+    for name, inp in uses.values():
+        cmd = (inp or {}).get("command") if isinstance(inp, dict) else None
+        if isinstance(cmd, str) and "tmux" in cmd:
+            spawned += _NEW_SESSION_RE.findall(cmd)
+    pending = [nv for tid, nv in uses.items() if tid not in resolved]
+    tool = None
+    if pending:
+        name, inp = pending[-1]
+        tool = {"name": name, "detail": _tool_detail(name, inp)}
+    subs = []
+    for tid, (name, inp) in uses.items():
+        if name in SUBAGENT_TOOLS:
+            d = inp if isinstance(inp, dict) else {}
+            subs.append({"type": d.get("subagent_type") or "agent",
+                         "task": str(d.get("description") or "")[:80],
+                         "running": tid not in resolved})
+    return tool, subs[-MAX_SUBAGENTS:], spawned
 
 
 def load_agent_status(session_id):
@@ -454,6 +494,7 @@ def load_chat(cwd, session_id):
 
 
 ART_EXTS = (".md", ".txt")
+BROWSE_MAX = 60
 ART_MAX_BYTES = 256 * 1024
 ART_MAX_FILES = 60
 
@@ -496,6 +537,37 @@ def list_artifacts(cwd, session_id):
                           "mtime": st.st_mtime, "size": st.st_size})
     files.sort(key=lambda f: -f["mtime"])
     return files[:ART_MAX_FILES]
+
+
+def browse_paths(prefix):
+    """Completions for the artifact picker: sub-directories and .md/.txt files
+    matching what has been typed so far.
+
+    Read-only and listing-only, and it widens nothing: pin_artifact already
+    accepts any path, so anything listed here was already reachable. Hidden
+    entries stay hidden unless explicitly typed."""
+    prefix = os.path.expanduser(prefix or "")
+    ends_in_sep = prefix.endswith(os.sep)
+    base = (prefix if ends_in_sep else os.path.dirname(prefix)) or "."
+    head = "" if ends_in_sep else os.path.basename(prefix)
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        if n.startswith(".") and not head.startswith("."):
+            continue
+        if head and not n.lower().startswith(head.lower()):
+            continue
+        full = os.path.join(base, n)
+        if os.path.isdir(full):
+            out.append(full + os.sep)
+        elif n.lower().endswith(ART_EXTS):
+            out.append(full)
+        if len(out) >= BROWSE_MAX:
+            break
+    return out
 
 
 def read_artifact(cwd, session_id, path):
@@ -604,25 +676,42 @@ def proc_foreground(pid):
 
 
 _ACTIVITY_RE = re.compile(r"([A-Z][a-zA-Z]+…\s*\([^)]*\))")
-_OPTION_RE = re.compile(r"^[\s❯>]*(\d)\.\s+(.+?)\s*$")
+_OPTION_RE = re.compile(r"^(?P<lead>[\s│>❯]*)(?P<key>\d)\.\s+(?P<label>.+?)\s*$")
+# Every blocking dialog Claude Code draws ends with this hint line.
+_DIALOG_HINT_RE = re.compile(r"esc to cancel", re.I)
+# A dialog always sits at the foot of the pane; a numbered list in the
+# conversation generally does not.
+PROMPT_TAIL_LINES = 12
 
 
 def detect_prompt(lines):
-    """Read Claude Code's permission dialog straight off the pane.
+    """Read whatever blocking menu the pane is showing.
 
     Hooks are optional, so the dialog itself — a question plus numbered
     options — is the ground truth for "this agent is waiting on you".
-    Kept strict (options must run 1..n and include a "yes") so ordinary
-    numbered lists in the conversation don't trigger it."""
-    opts = {}
-    for ln in lines:
+
+    It must stay strict, or an ordinary numbered list in the conversation
+    reads as a dialog. The original rule ("some option says yes") was strict
+    but far too narrow: it only ever matched permission prompts, so an
+    AskUserQuestion menu ("1. Red / 2. Green / …") left the agent showing as
+    *idle* while it sat blocked, and you had to go to the terminal. So accept
+    any of three independent dialog tells, all absent from prose: the ❯
+    selection cursor, the "Esc to cancel" hint line, or a yes-ish option."""
+    opts, cursor, last_at = {}, False, -1
+    for i, ln in enumerate(lines):
         m = _OPTION_RE.match(ln)
         if m:
-            opts[m.group(1)] = m.group(2)[:60]
+            opts[m.group("key")] = m.group("label")[:60]
+            cursor = cursor or "❯" in m.group("lead")
+            last_at = i
     keys = sorted(opts)
     if len(keys) < 2 or keys != [str(i) for i in range(1, len(keys) + 1)]:
         return None
-    if not any("yes" in v.lower() for v in opts.values()):
+    if last_at < len(lines) - PROMPT_TAIL_LINES:
+        return None  # too far up the pane to be a live dialog
+    has_yes = any("yes" in v.lower() for v in opts.values())
+    hint = any(_DIALOG_HINT_RE.search(ln) for ln in lines[-PROMPT_TAIL_LINES:])
+    if not (cursor or hint or has_yes):
         return None
     question = None
     for ln in lines:  # last text line before the options is the question
@@ -640,7 +729,9 @@ _MODE_FOOTERS = (("accept edits on", "acceptEdits"),
                  ("plan mode on", "plan"),
                  ("auto mode on", "auto"),
                  ("manual mode on", "default"))
-FOOTER_SCAN_LINES = 5
+# The footer is followed by the live agent roster when sub-agents are running,
+# so the scan has to reach past a parent line plus a few sub-agent rows.
+FOOTER_SCAN_LINES = 10
 
 
 def footer_mode(lines):
@@ -666,12 +757,38 @@ def footer_mode(lines):
     return None
 
 
+# The live agent roster Claude Code draws under the footer while sub-agents run:
+#   ● main
+#   ◯ general-purpose  Write vim history essay
+# "●" is the parent session, "◯" each running sub-agent.
+# \u25cf "●" parent, \u25ef "◯" a running sub-agent (\u25cb kept as a variant).
+_ROSTER_RE = re.compile(
+    r"^\s*[\u25cf\u25ef\u25cb]\s+(?P<type>\S+)(?:\s{2,}(?P<task>.+?))?\s*$")
+
+
+def roster_subagents(lines):
+    """Sub-agents running right now, read off the pane's agent roster.
+
+    The transcript can't answer this: Claude Code only writes a Task's tool_use
+    record once the sub-agent has finished, so by the time a sub-agent is
+    visible there it is already done. The roster is the only live view."""
+    out = []
+    for ln in lines[-FOOTER_SCAN_LINES:]:
+        m = _ROSTER_RE.match(ln)
+        if m and m.group("type") != "main":
+            out.append({"type": m.group("type")[:40],
+                        "task": (m.group("task") or "").strip()[:80],
+                        "running": True})
+    return out[:MAX_SUBAGENTS]
+
+
 def pane_status(target):
     """One pane capture → the live permission mode and the activity line.
 
     Mode comes from the bottom status footer ('⏵⏵ auto mode on · …'). Activity
     is the spinner line while the agent works ('✽ Ideating… (1m 39s · ↓ 6.2k)')."""
-    result = {"mode": None, "activity": None, "working": None, "prompt": None}
+    result = {"mode": None, "activity": None, "working": None, "prompt": None,
+              "subagents": []}
     if not target:
         return result
     out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-20"])
@@ -688,6 +805,7 @@ def pane_status(target):
     # "esc to interrupt" or a spinner line means the agent is actively working.
     result["working"] = bool(result["activity"]) or "esc to interrupt" in out.lower()
     result["prompt"] = detect_prompt(lines)
+    result["subagents"] = roster_subagents(lines)
     return result
 
 
@@ -757,20 +875,41 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
 _git_cache = {}
 
 
+def canonical_repo(cwd, toplevel, common_dir):
+    """Name of the repository a checkout belongs to.
+
+    A linked worktree has its own toplevel, so using that would call every
+    worktree a separate repo — four checkouts of one project got four different
+    hats. `git-common-dir` points at the *shared* .git for every worktree of a
+    repo, so its parent is the one directory they all agree on."""
+    if not common_dir:
+        return os.path.basename(toplevel)
+    abs_common = os.path.normpath(os.path.join(cwd, common_dir))
+    root = (os.path.dirname(abs_common)
+            if os.path.basename(abs_common) == ".git" else abs_common)
+    return os.path.basename(root) or os.path.basename(toplevel)
+
+
 def git_info(cwd):
-    """{repo, branch, commit} for cwd's git repo, or None. Cached ~15s per cwd
-    so the fast poll doesn't spawn a git process per agent per tick."""
+    """{repo, worktree, branch, commit} for cwd's git repo, or None. Cached ~15s
+    per cwd so the fast poll doesn't spawn a git process per agent per tick."""
     if not cwd or not os.path.isdir(cwd):
         return None
     now = time.time()
     hit = _git_cache.get(cwd)
     if hit and now - hit[0] < 15:
         return hit[1]
-    top = run(["git", "-C", cwd, "rev-parse", "--show-toplevel", "--short", "HEAD"]).split()
+    out = run(["git", "-C", cwd, "rev-parse",
+               "--show-toplevel", "--git-common-dir", "--short", "HEAD"]).split()
     info = None
-    if len(top) == 2:
+    if len(out) == 3:
+        toplevel, common_dir, commit = out
+        repo = canonical_repo(cwd, toplevel, common_dir)
+        checkout = os.path.basename(toplevel)
         branch = run(["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]).strip()
-        info = {"repo": os.path.basename(top[0]), "commit": top[1], "branch": branch}
+        info = {"repo": repo, "commit": commit, "branch": branch,
+                # only set when this is a linked worktree, not the main checkout
+                "worktree": checkout if checkout != repo else None}
     _git_cache[cwd] = (now, info)
     return info
 
@@ -814,21 +953,20 @@ def build_agent(reg, pid_to_pane, names=None):
     cwd = reg.get("cwd", "")
     pane = pid_to_pane.get(reg["pid"])
     tasks = load_tasks(sid)
-    last_event, _ = load_events(sid)
+    last_event = load_events(sid)
     tinfo = tail_transcript(cwd, sid)
-    chat_msgs = load_chat(cwd, sid)
-    last_user = next((m["text"] for m in reversed(chat_msgs) if m["role"] == "user"), None)
-    last_asst = next((m["text"] for m in reversed(chat_msgs) if m["role"] == "assistant"), None)
-    # The most recent user + assistant messages, kept in transcript order so the
-    # older one shows above the newer one (chat order).
-    lu_i = max((i for i, m in enumerate(chat_msgs) if m["role"] == "user"), default=None)
-    la_i = max((i for i, m in enumerate(chat_msgs) if m["role"] == "assistant"), default=None)
-    last_exchange = [{"role": chat_msgs[i]["role"], "text": chat_msgs[i]["text"],
-                      "ts": chat_msgs[i].get("ts"),
-                      "thinking": (chat_msgs[i].get("thinking") or "")[:2500] or None}
-                     for i in sorted(i for i in (lu_i, la_i) if i is not None)]
+    # Preview of the latest turn, straight from the tail we already parsed.
+    # This used to re-parse the whole 2 MB chat tail per agent per poll just to
+    # recover two messages tail_transcript had already found. /api/chat still
+    # builds the full conversation, but only for the one card you have open.
+    last_exchange = [m for m in (
+        {"role": "user", "text": tinfo["last_prompt"], "ts": tinfo["last_prompt_ts"]},
+        {"role": "assistant", "text": tinfo["last_assistant"],
+         "ts": tinfo["last_assistant_ts"]}) if m["text"]]
+    last_exchange.sort(key=lambda m: iso_to_epoch(m["ts"]) or 0)  # chat order
     pstatus = pane_status(pane["target"]) if pane else {
-        "mode": None, "activity": None, "working": None, "prompt": None}
+        "mode": None, "activity": None, "working": None, "prompt": None,
+        "subagents": []}
     # When the conversation last actually moved. Falls back to the file mtime
     # only when nothing in the tail carried a timestamp.
     last_activity = tinfo["last_activity"] or tinfo["mtime"]
@@ -874,8 +1012,8 @@ def build_agent(reg, pid_to_pane, names=None):
         "notification": notif_msg,
         "last_event_ts": (last_event or {}).get("ts"),
         "title": tinfo["title"],
-        "last_assistant": last_asst or tinfo["last_assistant"],
-        "last_prompt": last_user or tinfo["last_prompt"],
+        "last_assistant": tinfo["last_assistant"],
+        "last_prompt": tinfo["last_prompt"],
         "last_exchange": last_exchange,
         "transcript_mtime": tinfo["mtime"],
         "last_activity": last_activity,
@@ -885,9 +1023,52 @@ def build_agent(reg, pid_to_pane, names=None):
         "permission_mode": pstatus["mode"] or tinfo["permission_mode"],
         "activity": pstatus["activity"] if state == "busy" else None,
         "pending_tool": tinfo["pending_tool"] if state == "needs_input" else None,
+        "subagents": pstatus["subagents"] + [x for x in tinfo["subagents"]
+                                            if not x["running"]][-3:],
+        "_spawned": tinfo["spawned"],
         "prompt": pstatus["prompt"],
         "agent_status": status,
     }
+
+
+def link_spawns(agents):
+    """Attribute each session to whatever launched it.
+
+    tmux daemonises, so a spawned session's process parent is the tmux server,
+    not the agent that ran the command — /proc genuinely cannot answer this.
+    Two sources that can: the parent's own transcript, which recorded the
+    `tmux new-session` it ran, and the dashboard's own spawn log."""
+    by_session = {}
+    for a in agents:
+        if a["tmux"]:
+            by_session.setdefault(a["tmux"]["session"], a)
+    for a in agents:
+        a["spawns"], a["spawned_by"] = [], None
+    for a in agents:
+        for name in a.pop("_spawned", []):
+            child = by_session.get(name)
+            if child is not None and child is not a and not child["spawned_by"]:
+                child["spawned_by"] = a["display_name"] or a["name"]
+                a["spawns"].append(child["display_name"] or child["name"])
+    dashboard = read_json(SPAWNS_FILE) or {}
+    for a in agents:
+        if not a["spawned_by"] and a["tmux"] and a["tmux"]["session"] in dashboard:
+            a["spawned_by"] = "dashboard"
+    return agents
+
+
+def record_spawn(session_name):
+    """Remember that the dashboard created this tmux session, so its card can
+    say so. Pruned to sessions that still exist on every write."""
+    live = set(run(["tmux", "list-sessions", "-F", "#{session_name}"]).split())
+    cfg = {k: v for k, v in (read_json(SPAWNS_FILE) or {}).items() if k in live}
+    cfg[session_name] = "dashboard"
+    try:
+        with open(SPAWNS_FILE + ".tmp", "w") as f:
+            json.dump(cfg, f)
+        os.replace(SPAWNS_FILE + ".tmp", SPAWNS_FILE)  # atomic — no torn writes
+    except OSError:
+        pass
 
 
 def build_state():
@@ -912,9 +1093,17 @@ def build_state():
                 regs.append(reg)
     regs.extend(discover_live_regs(pid_to_pane, seen_pids, seen_sids))
     names = load_names()
-    agents = [build_agent(reg, pid_to_pane, names) for reg in regs]
+    agents = link_spawns([build_agent(reg, pid_to_pane, names) for reg in regs])
     # Stable identity sort; the frontend groups by attention state.
     agents.sort(key=lambda a: (a["project"] or "", a["name"] or ""))
+    # These caches are keyed by session / cwd and would otherwise keep an entry
+    # for every agent ever seen, for the life of the process.
+    live_sids = {a["sessionId"] for a in agents}
+    live_cwds = {a["cwd"] for a in agents}
+    for cache, live in ((_tail_cache, live_sids), (_chat_cache, live_sids),
+                        (_git_cache, live_cwds)):
+        for key in [k for k in cache if k not in live]:
+            cache.pop(key, None)
     spawn_dir = os.path.join(HOME, "projects")
     if not os.path.isdir(spawn_dir):
         spawn_dir = HOME
@@ -1081,7 +1270,11 @@ def set_mode(target, mode):
     return False, f"'{mode}' is not in this session's ⇧⇥ cycle (back at {st['mode']})"
 
 
-ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "1", "2", "3", "4", "y", "n"}
+# Menus can run past four options (an AskUserQuestion menu adds "Type something"
+# and "Chat about this"), and a key we refuse is a trip to the terminal — so
+# every digit a menu can offer is allowed. Still a fixed allowlist of single
+# keystrokes: nothing here can carry an argument or a payload.
+ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "y", "n"} | {str(i) for i in range(1, 10)}
 
 
 def send_key(target, key):
@@ -1188,6 +1381,7 @@ def spawn_session(cwd, prompt, name=None, resume=None):
                            timeout=5, check=True)
     except Exception as e:
         return False, str(e)
+    record_spawn(name)
     return True, name
 
 
@@ -1227,13 +1421,16 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(404, {"error": "unknown session"})
                     return
                 cwd = agent["cwd"]
-                files = list_artifacts(cwd, sid)
-                path = q.get("path", [""])[0] or (files[0]["path"] if files else "")
+                path = q.get("path", [""])[0]
                 text, err = read_artifact(cwd, sid, path) if path else (None, None)
-                self._send(200, {"files": files,
+                self._send(200, {"files": list_artifacts(cwd, sid),
                                  "sources": artifact_sources(cwd, sid),
                                  "path": path if text is not None else "",
                                  "text": text or "", "error": err})
+                return
+            if route == "/api/browse":
+                q = parse_qs(urlparse(self.path).query)
+                self._send(200, {"paths": browse_paths(q.get("path", [""])[0])})
                 return
             if route == "/api/sessions":
                 cwd = parse_qs(urlparse(self.path).query).get("cwd", [""])[0]
@@ -1292,9 +1489,17 @@ class Handler(BaseHTTPRequestHandler):
         if not action:
             self._send(404, {"error": "not found"})
             return
-        length = int(self.headers.get("Content-Length", 0))
         try:
-            ok, msg = action(json.loads(self.rfile.read(length)))
+            # Parsing the length inside the try matters: a malformed header used
+            # to raise straight out of the handler. The cap keeps a bad or
+            # oversized body from being read into memory wholesale.
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 <= length <= MAX_BODY_BYTES:
+                raise ValueError("bad Content-Length")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+            ok, msg = action(body)
         except Exception as e:
             ok, msg = False, str(e)
         self._send(200 if ok else 400, {"ok": ok, "msg": msg})

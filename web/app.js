@@ -129,7 +129,8 @@ function hashStr(s) {
    The device tint follows the hat, so repo-mates read as a family. */
 const HAT_NAMES = ["crown", "helm", "hennin", "wizard", "halo", "flowers", "horns", "bow",
                    "cap", "beanie", "tophat", "antenna", "laurel", "chef", "headphones", "mohawk"];
-const ITEM_NAMES = ["sword", "shield", "wand", "staff", "book", "lantern", "potion", "banner"];
+const ITEM_NAMES = ["sword", "shield", "wand", "staff", "book", "lantern", "potion", "banner",
+                    "key", "orb", "axe", "longbow", "scroll", "hammer", "balloon", "feather"];
 const ACCENTS = ["#ffd866", "#ff6188", "#78dce8", "#ab9df2", "#fc9867", "#a9dc76", "#8fb8ff", "#ffa7c4"];
 
 const hatKeyOf = a => a.git?.repo ? "repo:" + a.git.repo
@@ -206,7 +207,11 @@ const paint = (role, accent) => CLR[role] || accent;
 
 // The eyes never change: two 1×2 rectangular pupils. Idle just dreams in zzz.
 const EYES = [[6,6,"E"],[6,7,"E"],[11,6,"E"],[11,7,"E"]];
-const ZZZ = [[1,1,"z"],[2,0,"z"],[2,2,"z"]];
+// Sleeping. Three loose pixels just read as a blue diagonal scratch, so this is
+// an actual "z" glyph. Top-left corner, above every held item.
+const ZZZ = [[0,0,"z"],[1,0,"z"],[2,0,"z"],
+             [1,1,"z"],
+             [0,2,"z"],[1,2,"z"],[2,2,"z"]];
 
 // Before the first reply the model is unknown — the pet is still an egg.
 const EGG = (() => {
@@ -283,6 +288,26 @@ const ITEM = {
             [16,6,"A"],[17,6,"A"],[16,7,"A"],[17,7,"A"],[16,8,"A"],[17,8,"A"]],
   banner:  [[16,1,"D"],[16,2,"D"],[16,3,"D"],[16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"],
             [17,1,"A"],[17,2,"A"],[17,3,"A"],[17,4,"A"]],
+  key:     [[16,2,"G"],[15,3,"G"],[17,3,"G"],[16,4,"G"],                 // ring
+            [16,5,"G"],[16,6,"G"],[16,7,"G"],[16,8,"G"],
+            [17,6,"G"],[17,8,"G"]],                                      // teeth
+  orb:     [[16,3,"A"],[15,4,"A"],[16,4,"W"],[17,4,"A"],
+            [15,5,"A"],[16,5,"A"],[17,5,"A"],[16,6,"A"]],
+  axe:     [[16,1,"S"],[17,1,"S"],[15,2,"S"],[16,2,"S"],[17,2,"S"],[15,3,"S"],[16,3,"S"],
+            [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
+  longbow: [[1,3,"D"],[0,4,"D"],[0,5,"D"],[0,6,"D"],[0,7,"D"],[1,8,"D"],   // off-hand
+            [2,3,"W"],[2,4,"W"],[2,5,"W"],[2,6,"W"],[2,7,"W"],[2,8,"W"]],  // string
+  scroll:  [[15,4,"W"],[16,4,"W"],[17,4,"W"],
+            [15,5,"D"],[16,5,"W"],[17,5,"D"],
+            [15,6,"D"],[16,6,"W"],[17,6,"D"],
+            [15,7,"W"],[16,7,"W"],[17,7,"W"]],
+  hammer:  [[15,2,"S"],[16,2,"S"],[17,2,"S"],[15,3,"S"],[16,3,"S"],[17,3,"S"],
+            [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
+  balloon: [[16,0,"A"],[15,1,"A"],[16,1,"A"],[17,1,"A"],
+            [15,2,"A"],[16,2,"A"],[17,2,"A"],[16,3,"A"],
+            [16,4,"W"],[16,5,"W"],[16,6,"W"],[16,7,"W"]],                // string
+  feather: [[17,1,"W"],[16,2,"W"],[17,2,"W"],[16,3,"W"],[17,3,"W"],[16,4,"W"],
+            [16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],                // quill
 };
 
 function mascotSvg(a, cls = "") {
@@ -495,6 +520,30 @@ const MODE_SHORT = {default: "manual", acceptEdits: "auto-edit", plan: "plan",
 // separate opt-in with its own confirmation, so it is displayed but never set.
 const MODE_CYCLE = ["default", "acceptEdits", "plan", "auto"];
 
+/* Colour a menu option by what it does. Keyed on the label rather than the
+   position, because a question menu ("1. Red / 2. Green") has no affirmative
+   first option to paint green. */
+const OPTION_KINDS = [
+  [/^\s*(no|deny|reject|cancel|keep planning)\b/i, "no"],
+  [/^\s*(yes|allow|approve|accept)\b/i, "ok"],
+];
+
+function optionClass(label) {
+  const hit = OPTION_KINDS.find(([re]) => re.test(label || ""));
+  return hit ? hit[1] : "alt";
+}
+
+/* "tamaclaudchi:0.1" is tmux's session:window.pane address — opaque unless you
+   already know tmux. Spell it out, and give the command that gets you there. */
+function tmuxTitle(target) {
+  const m = /^(.+):(\d+)\.(\d+)$/.exec(target || "");
+  if (!m) return `tmux pane ${target || "unknown"}`;
+  return `Where this agent runs.\n`
+    + `tmux session "${m[1]}", window ${m[2]}, pane ${m[3]}.\n`
+    + `To watch it yourself, from a terminal on the machine running the agents:\n`
+    + `    tmux attach -t ${m[1]}`;
+}
+
 function keyBtn(target, key, label, cls) {
   return `<button class="key-btn ${cls}" data-target="${esc(target)}" data-key="${esc(key)}">${label}</button>`;
 }
@@ -514,7 +563,7 @@ function approvalActionsHtml(a) {
         ? o.label.slice(0, 20).trim() + (o.label.length > 20 ? "…" : "")
         : heads[i] || o.key);
     return `<div class="approve-row">${opts.map((o, i) => {
-      const cls = /^\s*no\b/i.test(o.label) ? "no" : i === 0 ? "ok" : "alt";
+      const cls = optionClass(o.label);
       return `<button class="key-btn ${cls}" data-target="${esc(a.tmux.target)}"
         data-key="${esc(o.key)}" title="${esc(o.key)}. ${esc(o.label)}">${esc(labels[i])}</button>`;
     }).join("")}</div>`;
@@ -617,6 +666,38 @@ function pendingLabel(a) {
   return (a.prompt && a.prompt.question) || a.notification || "Needs your approval";
 }
 
+/* Sub-agents a session spawned via the Task/Agent tool. They run *inside* the
+   parent process — no pid, no tmux pane, no transcript of their own — so they
+   can never be a pet on the shelf. The parent's card is the only place they
+   can be shown. Running ones are called out; finished ones fade to history and
+   drop off entirely once there are newer ones. */
+function subagentsHtml(a) {
+  const subs = a.subagents || [];
+  if (!subs.length) return "";
+  const live = subs.filter(s => s.running);
+  const shown = live.length ? live : subs.slice(-2);
+  return `<div class="subagents" title="Sub-agents spawned by this session. They run inside this agent, so they have no pet of their own.">
+    <span class="sub-label">${live.length ? "running" : "spawned"}</span>
+    ${shown.map(s => `<span class="sub-chip${s.running ? " live" : ""}"
+       title="${esc(s.type)}${s.task ? " — " + esc(s.task) : ""}">${esc(s.type)}</span>`).join("")}
+  </div>`;
+}
+
+function subagentsSectionHtml(a) {
+  const subs = a.subagents || [];
+  if (!subs.length) return "";
+  const rows = subs.slice().reverse().map(s => `<div class="sub-row${s.running ? " live" : ""}">
+    <span class="sub-chip${s.running ? " live" : ""}">${esc(s.type)}</span>
+    <span class="sub-task">${esc(s.task || "—")}</span>
+    <span class="sub-state">${s.running ? "running" : "done"}</span>
+  </div>`).join("");
+  return `<div class="section">
+    <div class="section-title">Sub-agents
+      <span class="when">run inside this session — no pet of their own</span></div>
+    <div class="sub-list">${rows}</div>
+  </div>`;
+}
+
 function cardHtml(a) {
   const tasks = a.tasks || [];
   const done = tasks.filter(t => t.status === "completed").length;
@@ -631,7 +712,7 @@ function cardHtml(a) {
     : a.current_task ? `▶ ${a.current_task}`
     : summaryLine(a) || STATE_LABEL[a.state] || a.state;
 
-  return `<div class="card tama ${esc(a.state)}" data-sid="${esc(a.sessionId)}"
+  return `<div class="card tama ${esc(a.state)}${a.spawned_by ? " child" : ""}" data-sid="${esc(a.sessionId)}"
     style="--pet-accent:${accent}">
     <div class="tama-screen">
       <div class="tama-top">
@@ -654,6 +735,7 @@ function cardHtml(a) {
         <div class="tama-pet">${mascotSvg(a)}<div class="pet-ground"></div></div>
       </div>
       <div class="mood-pill ${esc(a.state)}" title="${esc(mood)}">${esc(mood)}</div>
+      ${subagentsHtml(a)}
       ${approvalActionsHtml(a)}
     </div>
     <div class="tama-buttons">
@@ -662,9 +744,11 @@ function cardHtml(a) {
       <span class="led led-repo" title="Family light: same colour = same repo"></span>
     </div>
     <div class="shell-meta">
-      ${a.git ? `<div title="git repository · branch @ commit"><b>git</b> ${esc(a.git.repo)} · ${esc(a.git.branch)} @ ${esc(a.git.commit)}</div>` : ""}
+      ${a.git ? `<div title="Repository ${esc(a.git.repo)}${a.git.worktree ? `, linked worktree ${esc(a.git.worktree)}` : ""} · branch ${esc(a.git.branch)} @ commit ${esc(a.git.commit)}"><b>git</b> ${esc(a.git.repo)} · ${esc(a.git.branch)} @ ${esc(a.git.commit)}</div>` : ""}
       <div title="Session started ${esc(whenAbs(a.startedAt))} — id ${esc(a.sessionId)}">
         <b>born</b> ${ago(a.startedAt)} <span class="sid">#${esc((a.sessionId || "").slice(0, 8))}</span></div>
+      ${a.spawned_by ? `<div class="lineage" title="This session didn't start on its own — ${esc(a.spawned_by)} launched it."><b>from</b> ↳ ${esc(a.spawned_by)}</div>` : ""}
+      ${(a.spawns || []).length ? `<div class="lineage" title="Sessions this agent launched: ${esc(a.spawns.join(", "))}"><b>spawns</b> ${esc(a.spawns.join(", "))}</div>` : ""}
     </div>
     <div class="tama-foot">
       ${a.permission_mode ? (a.tmux
@@ -672,7 +756,7 @@ function cardHtml(a) {
              title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)} — click to change">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</button>`
         : `<span class="mode-chip" title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>`) : ""}
       ${a.tmux ? `<span class="tmux-tag"
-         title="Lives in tmux ${esc(a.tmux.target)} = session:window.pane">${esc(a.tmux.target)}</span>` : ""}
+         title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>` : ""}
       <span class="time" title="Last message in this conversation">${ago(a.last_activity)}</span>
     </div>
   </div>`;
@@ -791,9 +875,12 @@ function detailsSectionHtml(a) {
   const rows = [
     ["Session ID", a.sessionId],
     ["Path", a.cwd],
-    ["Repo", a.git ? `${a.git.repo} · ${a.git.branch} @ ${a.git.commit}` : "—"],
+    ["Repo", a.git ? `${a.git.repo}${a.git.worktree ? ` (worktree ${a.git.worktree})` : ""}`
+                     + ` · ${a.git.branch} @ ${a.git.commit}` : "—"],
     ["tmux", a.tmux ? a.tmux.target : "not found"],
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
+    ["Launched by", a.spawned_by || "started on its own"],
+    ["Spawned", (a.spawns || []).length ? a.spawns.join(", ") : "–"],
     ["Born", a.startedAt ? `${whenAbs(a.startedAt)} (${ago(a.startedAt)})` : "–"],
     ["Runtime", fmtDuration(a.startedAt)],
     ["Last activity", ago(a.last_activity)],
@@ -823,6 +910,7 @@ function overviewTab(a) {
     out.push(`<div class="section"><div class="card-activity big"><span class="spin-dot"></span>${esc(a.activity)}</div></div>`);
   }
   out.push(summarySectionHtml(a));
+  out.push(subagentsSectionHtml(a));
   out.push(modeSelectorHtml(a));
   out.push(detailsSectionHtml(a));
   out.push(contextDetailHtml(a));
@@ -911,26 +999,76 @@ function exchangeTab(a) {
 
 /* ---------- artifacts: any .md/.txt files or folders you pin ---------- */
 
-let arts = {sid: null, files: [], sources: [], path: "", text: "", error: null};
+/* Artifacts: one collapsible row per file. A row's text is fetched the first
+   time you open it and kept, so the tab costs nothing to show and each file is
+   read at most once per visit. */
+let arts = {sid: null, files: [], sources: [], open: [], texts: {}, error: null};
 
-async function loadArtifacts(sid, path) {
-  const q = `/api/artifacts?sid=${encodeURIComponent(sid)}` +
-            (path ? `&path=${encodeURIComponent(path)}` : "");
+async function loadArtifacts(sid) {
   try {
-    const d = await (await fetch(q, {headers: authHeaders()})).json();
+    const d = await (await fetch(`/api/artifacts?sid=${encodeURIComponent(sid)}`,
+      {headers: authHeaders()})).json();
     if (openSid !== sid) return;
+    const fresh = arts.sid !== sid;
     arts = {sid, files: d.files || [], sources: d.sources || [],
-            path: d.path || "", text: d.text || "", error: d.error || null};
+            open: fresh ? [] : arts.open, texts: fresh ? {} : arts.texts,
+            error: d.error || null};
     if (activeTab === "artifacts") renderModal();
   } catch { /* next open retries */ }
 }
 
-function artifactBody() {
-  if (arts.error) return `<div class="chat-loading">${esc(arts.error)}</div>`;
-  if (!arts.path) return `<div class="chat-loading">Nothing to show yet — pin a file or folder below.</div>`;
-  return arts.path.toLowerCase().endsWith(".txt")
-    ? `<pre class="codeblock"><code>${esc(arts.text)}</code></pre>`
-    : mdHtml(arts.text);
+async function openArtifact(sid, path) {
+  try {
+    const d = await (await fetch(
+      `/api/artifacts?sid=${encodeURIComponent(sid)}&path=${encodeURIComponent(path)}`,
+      {headers: authHeaders()})).json();
+    if (openSid !== sid || arts.sid !== sid) return;
+    arts.texts[path] = d.error ? `_${d.error}_` : (d.text || "");
+    if (activeTab === "artifacts") renderModal();
+  } catch { /* the row stays on "loading" until you toggle it again */ }
+}
+
+function toggleArtifact(path) {
+  const i = arts.open.indexOf(path);
+  if (i >= 0) {
+    arts.open.splice(i, 1);
+  } else {
+    arts.open.push(path);
+    if (arts.texts[path] === undefined) openArtifact(arts.sid, path);
+  }
+  renderModal();
+}
+
+function artifactRowBody(path) {
+  const text = arts.texts[path];
+  if (text === undefined) return `<div class="chat-loading">Loading…</div>`;
+  return path.toLowerCase().endsWith(".txt")
+    ? `<pre class="codeblock"><code>${esc(text)}</code></pre>`
+    : mdHtml(text);
+}
+
+function fmtBytes(n) {
+  return n >= 1e6 ? (n / 1e6).toFixed(1) + " MB"
+       : n >= 1e3 ? Math.round(n / 1e3) + " KB" : n + " B";
+}
+
+/* Completions for the pin box. Only re-queried when the directory part of what
+   you typed changes, so typing a filename doesn't hit the server per keystroke. */
+let browseDir = null;
+
+async function loadBrowse(value) {
+  const dir = value.slice(0, value.lastIndexOf("/") + 1);
+  if (dir === browseDir) return;
+  browseDir = dir;
+  try {
+    const d = await (await fetch(`/api/browse?path=${encodeURIComponent(value)}`,
+      {headers: authHeaders()})).json();
+    const list = modal.querySelector("#art-suggest");
+    if (list && browseDir === dir) {
+      list.innerHTML = (d.paths || [])
+        .map(p => `<option value="${esc(p)}"></option>`).join("");
+    }
+  } catch { /* completions are optional */ }
 }
 
 function artifactsTab(a) {
@@ -938,23 +1076,28 @@ function artifactsTab(a) {
     loadArtifacts(a.sessionId);
     return `<div class="section"><div class="chat-loading">Loading artifacts…</div></div>`;
   }
-  const picker = arts.files.length > 1
-    ? `<select class="art-pick">${arts.files.map(f =>
-        `<option value="${esc(f.path)}"${f.path === arts.path ? " selected" : ""}
-         >${esc(f.name)} · ${ago(f.mtime)}</option>`).join("")}</select>`
-    : arts.files.length === 1 ? `<span class="art-one">${esc(arts.files[0].name)}</span>` : "";
+  const rows = arts.files.map(f => {
+    const isOpen = arts.open.includes(f.path);
+    return `<div class="art-item${isOpen ? " open" : ""}">
+      <button class="art-head" data-path="${esc(f.path)}" title="${esc(f.path)}">
+        <span class="art-caret">${isOpen ? "▾" : "▸"}</span>
+        <span class="art-name">${esc(f.name)}</span>
+        <span class="art-meta">${fmtBytes(f.size)} · ${ago(f.mtime)}</span>
+      </button>
+      ${isOpen ? `<div class="art-body">${artifactRowBody(f.path)}</div>` : ""}
+    </div>`;
+  }).join("");
   const chips = arts.sources.map(src =>
     `<span class="art-chip" title="${esc(src)}">${esc(src.split("/").slice(-2).join("/"))}
       <button class="art-unpin" data-path="${esc(src)}" title="Stop watching this">✕</button></span>`).join("");
   return `<div class="section">
+    <div class="art-list">${rows || '<div class="chat-loading">Nothing to show yet — pin a file or folder below.</div>'}</div>
     <div class="art-bar">
-      ${picker}
-      <span class="art-count dim">${arts.files.length} file${arts.files.length === 1 ? "" : "s"}</span>
-      <input class="art-add" placeholder="pin a .md/.txt file or a folder…">
+      <input class="art-add" list="art-suggest" spellcheck="false"
+        placeholder="pin a .md/.txt file or a folder — start typing a path…">
+      <datalist id="art-suggest"></datalist>
       <button class="art-pin-btn">Pin</button>
     </div>
-    ${arts.path ? `<div class="art-path" title="${esc(arts.path)}">${esc(arts.path)}</div>` : ""}
-    <div class="art-body">${artifactBody()}</div>
     <div class="art-sources"><span class="dim">watching:</span> ${chips || '<span class="dim">nothing pinned</span>'}</div>
   </div>`;
 }
@@ -976,7 +1119,7 @@ function modalHeadHtml(a) {
     </span>
     <span class="model-tag" style="color:${model.outline}" title="Model — mascot colour">${esc(model.label)}</span>
     <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
-    ${a.tmux ? `<span class="tmux-tag" title="Lives in tmux ${esc(a.tmux.target)}">${esc(a.tmux.target)}</span>` : ""}
+    ${a.tmux ? `<span class="tmux-tag" title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>` : ""}
     <button class="kill-btn" data-sid="${esc(a.sessionId)}" title="Terminate this agent">Kill</button>
     <button class="modal-close" title="Close (Esc)">✕</button>`;
 }
@@ -1189,7 +1332,8 @@ function openModal(sid) {
   activeTab = "exchange";  // land on the conversation, scrolled to the latest
   lastRenderedTab = null;
   chat = {sid: null, messages: null};
-  arts = {sid: null, files: [], sources: [], path: "", text: "", error: null};
+  arts = {sid: null, files: [], sources: [], open: [], texts: {}, error: null};
+  browseDir = null;
   overlay.classList.remove("hidden");
   renderModal();
   loadChat(sid);  // populate the Overview's last-exchange tail promptly
@@ -1361,6 +1505,12 @@ document.body.addEventListener("click", e => {
       .then(() => loadArtifacts(openSid));
     return;
   }
+  const head = e.target.closest(".art-head");
+  if (head) {
+    e.stopPropagation();
+    toggleArtifact(head.dataset.path);
+    return;
+  }
   if (e.target.closest(".art-pin-btn")) {
     e.stopPropagation();
     pinArtifact();
@@ -1404,7 +1554,7 @@ document.body.addEventListener("click", e => {
   if (tab) {
     activeTab = tab.dataset.tab;
     if (activeTab === "exchange" && openSid) loadChat(openSid);
-    if (activeTab === "artifacts" && openSid) loadArtifacts(openSid, arts.path);
+    if (activeTab === "artifacts" && openSid) loadArtifacts(openSid);
     renderModal();
     return;
   }
@@ -1434,8 +1584,8 @@ async function pinArtifact() {
   else toast(r.msg || "could not pin that path", true);
 }
 
-document.body.addEventListener("change", e => {
-  if (e.target.closest(".art-pick") && openSid) loadArtifacts(openSid, e.target.value);
+document.body.addEventListener("input", e => {
+  if (e.target.closest(".art-add")) loadBrowse(e.target.value);
 });
 
 document.addEventListener("keydown", e => {
