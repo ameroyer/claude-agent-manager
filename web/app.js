@@ -713,7 +713,7 @@ function cardHtml(a) {
     : summaryLine(a) || STATE_LABEL[a.state] || a.state;
 
   return `<div class="card tama ${esc(a.state)}${a.spawned_by ? " child" : ""}" data-sid="${esc(a.sessionId)}"
-    style="--pet-accent:${accent}">
+    style="--pet-accent:${accent};--model-tint:${model.body}">
     <div class="tama-screen">
       <div class="tama-top">
         <span class="state-ico ${esc(a.state)}" title="${STATE_LABEL[a.state] || ""}">${STATE_ICON[a.state] || "○"}</span>
@@ -773,6 +773,7 @@ const TABS = [
   {id: "graph", label: "Work graph", show: a => !!agentGraph(a)},
   {id: "exchange", label: "Exchange",
    show: a => a.last_prompt || a.last_assistant || a.state === "needs_input"},
+  {id: "mcp", label: "MCP", show: a => (a.mcp || []).length > 0},
   {id: "artifacts", label: "Artifacts", show: () => true},
 ];
 
@@ -1102,9 +1103,34 @@ function artifactsTab(a) {
   </div>`;
 }
 
+/* MCP servers this session knows about, and whether they're usable. Names and
+   status only — a server's env/args/URL carry API keys, so the server never
+   reads or sends them. */
+const MCP_STATUS = {
+  connected: "connected",
+  configured: "not connected",
+  disabled: "disabled",
+};
+
+function mcpTab(a) {
+  const servers = a.mcp || [];
+  const live = servers.filter(m => m.status === "connected").length;
+  const rows = servers.map(m => `<div class="mcp-row ${esc(m.status)}">
+    <span class="mcp-dot"></span>
+    <span class="mcp-name">${esc(m.name)}</span>
+    <span class="mcp-state">${MCP_STATUS[m.status] || esc(m.status)}</span>
+  </div>`).join("");
+  return `<div class="section">
+    <div class="section-title">MCP servers
+      <span class="when">${live} of ${servers.length} connected</span></div>
+    <div class="mcp-list">${rows}</div>
+  </div>`;
+}
+
 function modalHtml(a) {
   if (activeTab === "graph") return graphTab(a);
   if (activeTab === "exchange") return exchangeTab(a);
+  if (activeTab === "mcp") return mcpTab(a);
   if (activeTab === "artifacts") return artifactsTab(a);
   return overviewTab(a);
 }

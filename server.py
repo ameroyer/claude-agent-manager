@@ -37,6 +37,7 @@ STATUS_DIR = os.path.join(CLAUDE_DIR, "agent-status")
 NAMES_FILE = os.path.join(CLAUDE_DIR, "agent-manager-names.json")
 ARTIFACTS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-artifacts.json")
 SPAWNS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-spawns.json")
+CLAUDE_CONFIG = os.path.join(HOME, ".claude.json")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
@@ -322,8 +323,7 @@ def tail_transcript(cwd, session_id):
                 info["last_prompt"] = p[:EXCHANGE_PREVIEW_CHARS]
         elif t == "permission-mode" and not info["permission_mode"]:
             info["permission_mode"] = rec.get("permissionMode")
-    (info["pending_tool"], info["subagents"],
-     info["spawned"]) = scan_tool_calls(lines)
+    info.update(scan_tool_calls(lines))
     _tail_cache[session_id] = (mtime, info)
     return info
 
@@ -351,8 +351,9 @@ MAX_SUBAGENTS = 6
 
 
 def scan_tool_calls(lines):
-    """One pass over the tail → (tool awaiting approval, sub-agents, tmux
-    sessions this agent launched).
+    """One pass over the tail → the tool awaiting approval, the sub-agents this
+    session spawned, and the tmux sessions it launched. Returned as a dict so
+    another signal doesn't grow a tuple.
 
     A tool_use with no matching tool_result is still awaiting run/approval;
     that same pairing tells us which sub-agents are still going.
@@ -395,7 +396,83 @@ def scan_tool_calls(lines):
             subs.append({"type": d.get("subagent_type") or "agent",
                          "task": str(d.get("description") or "")[:80],
                          "running": tid not in resolved})
-    return tool, subs[-MAX_SUBAGENTS:], spawned
+    return {"pending_tool": tool, "subagents": subs[-MAX_SUBAGENTS:],
+            "spawned": spawned}
+
+
+_config_cache = {"mtime": None, "cfg": {}}
+
+
+def claude_config():
+    """~/.claude.json, re-read only when it changes — it is ~100 KB and every
+    agent would otherwise re-parse it on every poll."""
+    try:
+        mtime = os.path.getmtime(CLAUDE_CONFIG)
+    except OSError:
+        return {}
+    if _config_cache["mtime"] != mtime:
+        _config_cache.update(mtime=mtime, cfg=read_json(CLAUDE_CONFIG) or {})
+    return _config_cache["cfg"]
+
+
+MCP_SCAN_BYTES = 512 * 1024
+MCP_STATE_TTL = 60
+_mcp_state_cache = {}
+
+
+def connected_mcp(cwd, session_id):
+    """Servers whose tools are actually exposed to this session.
+
+    Config can only say "enabled". Claude Code records real tool availability as
+    `deferred_tools_delta` attachments naming `mcp__<server>__<tool>`, which is
+    the only evidence a server actually connected — and it also catches servers
+    that never appear in ~/.claude.json, such as the claude.ai-connected ones.
+
+    Tools are tracked individually: `removedNames` drops one tool, not a whole
+    server, so a server counts as connected while any of its tools remain."""
+    hit = _mcp_state_cache.get(session_id)
+    if hit and time.time() - hit[0] < MCP_STATE_TTL:
+        return hit[1]
+    try:
+        with open(transcript_path(cwd, session_id), "rb") as f:
+            blob = f.read(MCP_SCAN_BYTES).decode("utf-8", "replace")
+    except OSError:
+        blob = ""
+    tools = set()
+    for line in blob.splitlines():
+        if "deferred_tools_delta" not in line:
+            continue
+        try:
+            att = json.loads(line).get("attachment") or {}
+        except Exception:
+            continue
+        for name in (att.get("addedNames") or []) + (att.get("readdedNames") or []):
+            tools.add(str(name))
+        for name in att.get("removedNames") or []:
+            tools.discard(str(name))
+    live = {t.split("__")[1] for t in tools
+            if t.startswith("mcp__") and len(t.split("__")) >= 3}
+    _mcp_state_cache[session_id] = (time.time(), live)
+    return live
+
+
+def mcp_servers(cwd, session_id):
+    """Every MCP server this session knows about, and whether it is usable.
+
+    Only the name and a status — a server's env, args and URL routinely carry
+    API keys, and none of them are read or returned."""
+    cfg = claude_config()
+    proj = (cfg.get("projects") or {}).get(cwd) or {}
+    disabled = set(proj.get("disabledMcpServers") or [])
+    disabled |= set(proj.get("disabledMcpjsonServers") or [])
+    live = connected_mcp(cwd, session_id)
+    names = set(cfg.get("mcpServers") or {}) | set(proj.get("mcpServers") or {}) | live
+    out = []
+    for name in sorted(names, key=str.lower):
+        status = ("disabled" if name in disabled
+                  else "connected" if name in live else "configured")
+        out.append({"name": name, "status": status})
+    return out
 
 
 def load_agent_status(session_id):
@@ -1026,6 +1103,7 @@ def build_agent(reg, pid_to_pane, names=None):
         "subagents": pstatus["subagents"] + [x for x in tinfo["subagents"]
                                             if not x["running"]][-3:],
         "_spawned": tinfo["spawned"],
+        "mcp": mcp_servers(cwd, sid),
         "prompt": pstatus["prompt"],
         "agent_status": status,
     }
@@ -1101,7 +1179,7 @@ def build_state():
     live_sids = {a["sessionId"] for a in agents}
     live_cwds = {a["cwd"] for a in agents}
     for cache, live in ((_tail_cache, live_sids), (_chat_cache, live_sids),
-                        (_git_cache, live_cwds)):
+                        (_mcp_state_cache, live_sids), (_git_cache, live_cwds)):
         for key in [k for k in cache if k not in live]:
             cache.pop(key, None)
     spawn_dir = os.path.join(HOME, "projects")
