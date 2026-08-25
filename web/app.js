@@ -7,6 +7,7 @@ let openSid = null;
 let agents = [];
 let editingName = false;  // pause head re-render while the rename input is open
 let lastPayload = "";
+let lastGridHtml = "";  // same idea as lastBodyHtml, for the shelf
 let spawnDir = "~/";  // server expands ~; refined from /api/state
 
 // The server gates /api/* on this token; it rides in the URL fragment
@@ -551,6 +552,19 @@ function keyBtn(target, key, label, cls) {
 /* Mirror whatever menu the CLI is actually showing, so the buttons match the
    real options (manual mode included). Falls back to the classic trio when the
    pane can't be read. */
+/* A multi-question form answers one question per click and then advances, so
+   without this the menu silently becomes a different question and the click
+   looks like it did nothing. */
+function formStepsHtml(a) {
+  const steps = (a.prompt && a.prompt.steps) || [];
+  if (!steps.length) return "";
+  const left = steps.filter(x => !x.done).length - 1;  // the Submit step is not a question
+  return `<div class="form-steps" title="This is a multi-part question — answering one moves to the next.">
+    ${steps.map(x => `<span class="step${x.done ? " done" : ""}">${x.done ? "✓ " : ""}${esc(x.label)}</span>`).join("")}
+    ${left > 0 ? `<span class="step-left">${left} more to answer</span>` : ""}
+  </div>`;
+}
+
 function approvalActionsHtml(a) {
   if (a.state !== "needs_input" || !a.tmux) return "";
   const opts = a.prompt && a.prompt.options;
@@ -562,7 +576,7 @@ function approvalActionsHtml(a) {
       heads.filter(h => h === heads[i]).length > 1
         ? o.label.slice(0, 20).trim() + (o.label.length > 20 ? "…" : "")
         : heads[i] || o.key);
-    return `<div class="approve-row">${opts.map((o, i) => {
+    return `${formStepsHtml(a)}<div class="approve-row">${opts.map((o, i) => {
       const cls = optionClass(o.label);
       return `<button class="key-btn ${cls}" data-target="${esc(a.tmux.target)}"
         data-key="${esc(o.key)}" title="${esc(o.key)}. ${esc(o.label)}">${esc(labels[i])}</button>`;
@@ -767,6 +781,11 @@ function cardHtml(a) {
 let activeTab = "overview";
 let lastRenderedTab = null;
 let lastChatKey = "";
+/* The modal body is re-rendered on every poll. Replacing innerHTML destroys
+   every bit of DOM state inside it — scroll positions, open <details>, the
+   caret — and only the body's own scrollTop was ever restored. So compare the
+   markup first and leave the DOM completely alone when nothing changed. */
+let lastBodyHtml = "";
 
 const TABS = [
   {id: "overview", label: "Overview", show: () => true},
@@ -1268,6 +1287,11 @@ async function sendMessage() {
   }
   loadChat(a.sessionId);                                   // catch it early
   setTimeout(() => loadChat(a.sessionId), 900);            // and once it lands
+  // Refresh the board now rather than waiting up to a second for the next poll,
+  // then once more after the CLI has had time to start showing its spinner —
+  // otherwise the card sits on "idle" for a beat after you hit send.
+  tick();
+  setTimeout(tick, 450);
 }
 
 async function stopAgent() {
@@ -1324,6 +1348,7 @@ function renderModal() {
     modal.dataset.sid = a.sessionId;
     modal.innerHTML = `<div class="modal-head"></div><div class="tabbar"></div>
       <div class="modal-body"></div>${composerHtml(a)}`;
+    lastBodyHtml = "";  // fresh shell, nothing rendered into it yet
     wireComposer();
   }
   if (!TABS.find(t => t.id === activeTab)?.show(a)) activeTab = "overview";
@@ -1333,8 +1358,18 @@ function renderModal() {
   if (body.contains(document.activeElement) &&
       document.activeElement.classList.contains("art-add")) return;  // mid-typing
   if (hasSelectionIn(body)) return;  // don't yank the text out from under a selection
+  const html = modalHtml(a);
+  if (html === lastBodyHtml) {  // identical render — keep the DOM and its scroll
+    lastRenderedTab = activeTab;
+    return;
+  }
   const scroll = activeTab === lastRenderedTab ? body.scrollTop : 0;
-  body.innerHTML = modalHtml(a);
+  // Open <details> (the Thinking disclosures) are DOM state too — they snapped
+  // shut on every rebuild. Carry the flags across, matched by position.
+  const opened = [...body.querySelectorAll("details")].map(d => d.open);
+  body.innerHTML = html;
+  lastBodyHtml = html;
+  body.querySelectorAll("details").forEach((d, i) => { if (opened[i]) d.open = true; });
   const msgs = chat.messages || [];
   // Tool entries carry no .text — reading it unguarded threw here, which
   // aborted the render before the scroll-to-bottom below. That is why opening
@@ -1368,6 +1403,7 @@ function openModal(sid) {
 
 function closeModal() {
   openSid = null;
+  lastBodyHtml = "";
   modal.dataset.sid = "";
   overlay.classList.add("hidden");
 }
@@ -1391,7 +1427,7 @@ function render() {
   // Don't yank an open picker, or text you're in the middle of selecting.
   // Everything outside the grid still refreshes.
   if (!grid.querySelector(".model-menu") && !hasSelectionIn(grid)) {
-    grid.innerHTML = agents.length
+    const gridHtml = agents.length
       ? GROUPS.map(g => {
           const list = agents.filter(a => g.states.includes(a.state));
           if (!list.length) return "";
@@ -1409,6 +1445,12 @@ function render() {
             </div>` + list.map(cardHtml).join("");
         }).join("")
       : `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`;
+    // Only rebuild the shelf when it would actually look different; otherwise
+    // the page scroll (and any hover) is disturbed once a second for nothing.
+    if (gridHtml !== lastGridHtml) {
+      grid.innerHTML = gridHtml;
+      lastGridHtml = gridHtml;
+    }
   }
   document.title = agents.some(a => a.state === "needs_input")
     ? "⚠ TamaClaudchi" : "TamaClaudchi";

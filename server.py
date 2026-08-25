@@ -764,6 +764,28 @@ _DIALOG_HINT_RE = re.compile(r"esc to cancel", re.I)
 PROMPT_TAIL_LINES = 12
 
 
+# The step bar a multi-question AskUserQuestion draws above its options:
+#   \u2190  \u2612 Editor  \u2610 Shell  \u2714 Submit  \u2192
+# \u2612 answered, \u2610 still to answer, \u2714 the final submit step.
+_FORM_MARKS = "\u2610\u2612\u2714"
+_FORM_STEP_RE = re.compile("([%s])\\s*([^%s\u2190\u2192]+)" % (_FORM_MARKS, _FORM_MARKS))
+
+
+def form_steps(lines):
+    """Steps of a multi-question form, or [] for an ordinary single menu.
+
+    Answering one question advances to the next, so one click is rarely the
+    whole interaction. Without this the menu silently turns into a different
+    question and it looks like the click did nothing."""
+    for line in reversed(lines[-(PROMPT_TAIL_LINES + 6):]):
+        if "\u2714" in line and ("\u2610" in line or "\u2612" in line):
+            steps = [{"label": label.strip()[:24], "done": mark == "\u2612"}
+                     for mark, label in _FORM_STEP_RE.findall(line) if label.strip()]
+            if len(steps) >= 2:
+                return steps
+    return []
+
+
 def detect_prompt(lines):
     """Read whatever blocking menu the pane is showing.
 
@@ -799,7 +821,7 @@ def detect_prompt(lines):
             break
         if ln.strip():
             question = ln.strip()[:160]
-    return {"question": question,
+    return {"question": question, "steps": form_steps(lines),
             "options": [{"key": k, "label": opts[k]} for k in keys]}
 
 
@@ -1247,35 +1269,65 @@ def valid_pane(target):
     return target in out.split()
 
 
+def composer_holds(target, probe):
+    """True while `probe` is still sitting in the pane's input box.
+
+    The composer is NOT the pane's last line — a rule and the mode footer sit
+    below it — so the original lines[-1] check inspected the footer and never
+    matched, meaning the retry it guarded never fired.
+
+    Past user turns are drawn with the same "❯" marker as the input box, so a
+    plain search matches the message we just sent and reports it as unsent. The
+    composer is specifically the bottom-most "❯" line, so scan up from the end
+    and test only that one."""
+    lines = [ln for ln in
+             run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-4"]).splitlines()
+             if ln.strip()]
+    for line in reversed(lines):
+        if line.lstrip().startswith("\u276f"):
+            return probe in line
+    return False
+
+
+def wait_until(predicate, timeout, step=0.03):
+    """Poll `predicate` until it holds. Returns whether it did."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(step)
+    return False
+
+
 def send_text(target, text):
     """Paste a message into the agent's composer and submit it.
 
-    A busy pane can swallow the Enter, leaving the message sitting unsent in
-    the composer — so after submitting we check whether the text is still on
-    the input line and press Enter once more if it is."""
+    Waits on what the pane actually shows rather than on fixed sleeps: the two
+    hardcoded ones here cost 900ms on every send, which is most of the delay
+    before a card flips to "working". A busy pane can still swallow the Enter,
+    leaving the message unsent, so if the text is still in the composer
+    afterwards we press Enter once more."""
     if not text.strip():
         return False, "empty message"
     if not valid_pane(target):
         return False, "unknown pane"
     enter = ["tmux", "send-keys", "-t", target, "Enter"]
+    probe = text.strip().splitlines()[0][:20]
     try:
         subprocess.run(["tmux", "load-buffer", "-b", "claude-agent-manager", "-"],
                        input=text.encode(), timeout=5, check=True)
         subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", "claude-agent-manager",
                         "-t", target], timeout=5, check=True)
-        time.sleep(0.5)  # let the composer settle so Enter isn't swallowed
+        # let the paste land before submitting, or the Enter gets swallowed
+        wait_until(lambda: composer_holds(target, probe), 1.5)
         subprocess.run(enter, timeout=5, check=True)
-        time.sleep(0.4)
-        # still on the input line? then the first Enter didn't take.
-        tail = [ln for ln in
-                run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-3"]).splitlines()
-                if ln.strip()]
-        probe = text.strip().splitlines()[0][:20]
-        if tail and probe and probe in tail[-1]:
+        if not wait_until(lambda: not composer_holds(target, probe), 1.0):
             subprocess.run(enter, timeout=5, check=True)
+            _cache["t"] = 0.0
             return True, "sent (needed a second Enter)"
     except Exception as e:
         return False, str(e)
+    _cache["t"] = 0.0  # let the very next poll see the agent start working
     return True, "sent"
 
 

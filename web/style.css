@@ -246,6 +246,17 @@ main {
   word-break: break-word;
 }
 
+/* multi-question form progress, above the option buttons */
+.form-steps { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.form-steps .step {
+  font: 700 9.5px var(--mono); text-transform: uppercase; letter-spacing: .06em;
+  padding: 2px 7px; border-radius: 5px;
+  background: var(--surface-2); color: var(--muted);
+  border: 1px solid var(--border); white-space: nowrap;
+}
+.form-steps .step.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, transparent); }
+.step-left { font: 10.5px var(--mono); color: var(--warning); }
+
 /* approval actions */
 .approve-row { margin-top: 12px; display: flex; gap: 7px; flex-wrap: wrap; }
 .key-btn {
@@ -1118,10 +1129,11 @@ button.model-tag:hover { background: var(--lcd); }
 .art-caret { color: var(--muted); font-size: 11px; width: 9px; flex-shrink: 0; }
 .art-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .art-meta { margin-left: auto; font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
-.art-body {
-  padding: 12px 14px; border-top: 1px solid var(--hairline);
-  max-height: 460px; overflow: auto;
-}
+/* No max-height and no overflow on purpose: a scrollable box nested inside the
+   scrollable modal body gives two scrollbars and traps the wheel, and its
+   scroll position is lost on every re-render. Let the content flow and let the
+   modal body be the one thing that scrolls. */
+.art-body { padding: 12px 14px; border-top: 1px solid var(--hairline); }
 
 /* ---------- MCP tab ---------- */
 .mcp-list { display: flex; flex-direction: column; gap: 5px; }
