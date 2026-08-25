@@ -161,10 +161,10 @@ h1::before { content: ""; }
   padding: 6px 14px;
   cursor: pointer;
   box-shadow: 2px 2px 0 var(--shell-edge);
-  transition: transform .08s steps(2), box-shadow .08s steps(2);
+  transition: transform .16s ease;
 }
-.new-agent-btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--shell-edge); }
-.new-agent-btn:active { transform: translate(2px,2px); box-shadow: 0 0 0 var(--shell-edge); }
+.new-agent-btn:hover { transform: translate(-1px,-1px); }
+.new-agent-btn:active { transform: translate(1px,1px); }
 .conn {
   margin-left: 16px;
   color: var(--shell-ink-dim);
@@ -212,12 +212,6 @@ main {
   box-shadow: var(--shadow-card);
   transition: transform .13s ease, border-color .13s ease, box-shadow .13s ease;
 }
-.card:hover {
-  transform: translateY(-2px);
-  border-color: color-mix(in srgb, var(--ink) 22%, var(--border));
-  box-shadow: 0 2px 4px rgba(0,0,0,0.4), 0 14px 34px rgba(0,0,0,0.34);
-}
-
 .state-ico { font-size: 11px; flex-shrink: 0; width: 13px; text-align: center; }
 .state-ico.busy { color: var(--good); animation: pulse 2.4s ease-in-out infinite; }
 .state-ico.needs_input { color: var(--critical); animation: pulse 1.4s ease-in-out infinite; }
@@ -815,12 +809,12 @@ main {
   background: color-mix(in srgb, var(--model-tint) 14%, var(--shell));
   border: 2px solid color-mix(in srgb, var(--model-tint) 30%, var(--shell-edge));
   box-shadow: 5px 5px 0 color-mix(in srgb, var(--ink) 22%, transparent);
-  transition: transform .08s steps(2), box-shadow .08s steps(2);
+  /* The card slides on hover. It used to step in two discrete frames and grow
+     its shadow at the same time, which read as a bump rather than a shift. */
+  transition: transform .16s ease;
 }
-.card.tama:hover { transform: translate(-2px,-2px);
-  box-shadow: 7px 7px 0 color-mix(in srgb, var(--ink) 24%, transparent); }
-.card.tama:active { transform: translate(2px,2px);
-  box-shadow: 2px 2px 0 color-mix(in srgb, var(--ink) 22%, transparent); }
+.card.tama:hover { transform: translate(-2px,-2px); }
+.card.tama:active { transform: translate(1px,1px); }
 .card.tama.needs_input { border-color: var(--critical);
   box-shadow: 5px 5px 0 color-mix(in srgb, var(--critical) 45%, transparent); }
 .card.tama.idle { opacity: .88; }
@@ -966,7 +960,6 @@ button.model-tag:hover { background: var(--lcd); }
   border-style: dashed;
 }
 .card.child .tama-shell, .card.child .tama-screen { filter: saturate(.8); }
-.card.child:hover { box-shadow: var(--shadow-card); }
 .lineage { font-style: italic; }
 
 /* sub-agents: spawned inside a session, shown on its own card */
@@ -1013,10 +1006,10 @@ button.model-tag:hover { background: var(--lcd); }
   border-radius: 8px; border: 2px solid var(--shell-edge);
   padding: 5px 12px; cursor: pointer;
   box-shadow: 2px 2px 0 var(--shell-edge);
-  transition: transform .08s steps(2), box-shadow .08s steps(2);
+  transition: transform .16s ease;
 }
-.tama-screen .key-btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--shell-edge); }
-.tama-screen .key-btn:active, .tama-screen .key-btn.sent { transform: translate(2px,2px); box-shadow: 0 0 0 var(--shell-edge); }
+.tama-screen .key-btn:hover { transform: translate(-1px,-1px); }
+.tama-screen .key-btn:active, .tama-screen .key-btn.sent { transform: translate(1px,1px); }
 .tama-screen .key-btn.ok { background: #a9dc76; color: #223012; }
 .tama-screen .key-btn.alt { background: var(--lcd-hi); color: var(--lcd-ink); }
 .tama-screen .key-btn.no { background: #ff6188; color: #3c0517; }

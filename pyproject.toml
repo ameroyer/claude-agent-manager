@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tamaclaudchi"
+version = "0.1.0"
+description = "A local dashboard for watching several Claude Code agents at once, as a shelf of Tamagotchi handhelds"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+keywords = ["claude", "claude-code", "tmux", "dashboard", "agents"]
+classifiers = [
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+]
+# Stdlib only, on purpose: no runtime dependencies, no build step, no external
+# assets. `uvx tamaclaudchi` therefore pulls nothing but this package.
+dependencies = []
+
+[project.scripts]
+tamaclaudchi = "tamaclaudchi:main"
+
+[project.urls]
+Homepage = "https://github.com/YOUR-USERNAME/claude-agent-manager"
+
+# The repo is deliberately flat — `server.py` and `web/` sit at the root so that
+# `python3 server.py` works in a clone with nothing installed. These mappings
+# assemble the package layout at build time instead of restructuring the repo:
+# server.py becomes the package module, and web/ ships beside it as package data
+# (WEB_DIR is resolved from __file__, so it lands correctly either way).
+[tool.hatch.build.targets.wheel]
+# force-include below is the whole file selection; without this hatchling also
+# auto-ships server.py and web/ at the wheel root, duplicating the assets and
+# dropping a stray top-level web/ into site-packages.
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.force-include]
+"server.py" = "tamaclaudchi/__init__.py"
+"web" = "tamaclaudchi/web"
+
+[tool.hatch.build.targets.sdist]
+# Leading "/" anchors each pattern to the repo root. Unanchored, "web" and
+# "hooks" also match .claude/worktrees/*/web, which swept an entire unrelated
+# worktree into the sdist.
+include = ["/server.py", "/web", "/hooks", "/README.md", "/LICENSE", "/pyproject.toml"]

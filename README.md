@@ -28,7 +28,7 @@ anything special for it to work.
 
 ## Requirements
 
-- Python 3 (standard library only — nothing to `pip install`)
+- Python 3.9+ (standard library only — nothing to `pip install`)
 - tmux
 - Claude Code
 - Linux on the machine running the server — it reads `/proc` for process info,
@@ -37,11 +37,23 @@ anything special for it to work.
 
 ## Running it
 
+No clone, no install — `uvx` fetches and runs it:
+
+```bash
+uvx --from git+https://github.com/YOUR-USERNAME/claude-agent-manager tamaclaudchi
+```
+
+Or from a clone, with nothing installed at all:
+
 ```bash
 git clone https://github.com/YOUR-USERNAME/claude-agent-manager.git
 cd claude-agent-manager
 python3 server.py
 ```
+
+Both run the same server, and take the same flags (`--port`, `--host`,
+`--token`). It's stdlib-only with no runtime dependencies, so `uvx` pulls this
+package and nothing else.
 
 On startup it prints a URL with an access token in the fragment, e.g.
 `http://127.0.0.1:8842/#Xk3p…`. Open that exact URL — the token gates every

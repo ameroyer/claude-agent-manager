@@ -38,7 +38,10 @@ NAMES_FILE = os.path.join(CLAUDE_DIR, "agent-manager-names.json")
 ARTIFACTS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-artifacts.json")
 SPAWNS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-spawns.json")
 CLAUDE_CONFIG = os.path.join(HOME, ".claude.json")
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+# realpath, not abspath: installed into a venv (uvx/pip) any parent may be a
+# symlink, and the static-file guard below compares against a realpath'd
+# candidate — a mismatch there would 404 every asset.
+WEB_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web"))
 
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
 CHAT_TAIL_BYTES = 2 * 1024 * 1024
