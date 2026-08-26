@@ -16,10 +16,14 @@ const token = location.hash.slice(1);
 const authHeaders = extra => Object.assign({"X-Auth-Token": token}, extra || {});
 
 /* "new" pastille: Claude answered after the last time you opened that card.
-   Seen marks live in localStorage (per-browser; wrapped for private mode). */
+   Seen marks live in localStorage (per-browser; wrapped for private mode).
+
+   A session we have no mark for is NOT new — it is simply one we have not
+   recorded yet, so it gets baselined on sight (see tick). Defaulting the other
+   way meant every card you had never opened wore the pill forever, and a fresh
+   board lit up wholesale; with localStorage unavailable it could never clear. */
 let seen = {};
 try { seen = JSON.parse(localStorage.tamaSeen || "{}"); } catch { /* fresh */ }
-let seenReady = (() => { try { return "tamaSeen" in localStorage; } catch { return true; } })();
 function saveSeen() { try { localStorage.tamaSeen = JSON.stringify(seen); } catch { /* ignore */ } }
 function markSeen(a) {  // true when the mark actually moved (caller then saves)
   if (!a || !a.last_activity || seen[a.sessionId] === a.last_activity) return false;
@@ -29,7 +33,19 @@ function markSeen(a) {  // true when the mark actually moved (caller then saves)
 function hasNew(a) {
   if (a.state === "busy" || a.state === "needs_input" || !a.last_activity) return false;
   const s = seen[a.sessionId];
-  return s === undefined || a.last_activity > s + 2;
+  return s !== undefined && a.last_activity > s + 2;
+}
+/* Record every session we have not met before, so the pill can only ever mean
+   "this conversation moved since you last looked at it". */
+function baselineUnseen() {
+  let added = false;
+  for (const a of agents) {
+    if (a.last_activity && seen[a.sessionId] === undefined) {
+      seen[a.sessionId] = a.last_activity;
+      added = true;
+    }
+  }
+  if (added) saveSeen();
 }
 
 const STATE_LABEL = {
@@ -1734,11 +1750,7 @@ async function tick() {
     const data = await res.json();
     agents = data.agents || [];
     spawnDir = data.spawn_dir || spawnDir;
-    if (!seenReady) {  // first visit ever: baseline, so nothing screams "new"
-      agents.forEach(markSeen);
-      seenReady = true;
-      saveSeen();
-    }
+    baselineUnseen();  // never-met sessions start "seen", not "new"
     if (Object.keys(seen).length > 300) {  // prune marks of long-gone sessions
       const live = new Set(agents.map(a => a.sessionId));
       seen = Object.fromEntries(Object.entries(seen).filter(([k]) => live.has(k)));
