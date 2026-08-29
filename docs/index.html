@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TamaClaudchi — developer guide</title>
+<style>
+  :root { color-scheme: light dark;
+    --ink: #2f2a33; --dim: #6d6675; --line: #e3dde8; --bg: #fbf9fc; --box: #fff;
+    --accent: #b3572f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e9e6ec; --dim: #a09aa8; --line: #322e37; --bg: #191720; --box: #211f28;
+            --accent: #f0a17a; } }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; max-width: 46rem; padding: 2.5rem 1.25rem 5rem;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1 { font-size: 1.6rem; margin: 0 0 .2rem; }
+  h2 { font-size: 1.05rem; margin: 2.4rem 0 .6rem; padding-bottom: .3rem;
+    border-bottom: 1px solid var(--line); }
+  h3 { font-size: .95rem; margin: 1.5rem 0 .4rem; }
+  p, li { color: var(--ink); }
+  .lede { color: var(--dim); margin: 0 0 1.5rem; }
+  code, pre { font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  code { background: var(--box); border: 1px solid var(--line);
+    border-radius: 4px; padding: .05em .35em; }
+  pre { background: var(--box); border: 1px solid var(--line); border-radius: 8px;
+    padding: .8rem 1rem; overflow-x: auto; }
+  pre code { background: none; border: 0; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: .6rem 0; font-size: 14px; }
+  th, td { text-align: left; padding: .38rem .6rem; border-bottom: 1px solid var(--line);
+    vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; }
+  td:first-child { white-space: nowrap; }
+  ul { padding-left: 1.2rem; }
+  .warn { border-left: 3px solid var(--accent); padding: .5rem .9rem; margin: .8rem 0;
+    background: var(--box); border-radius: 0 6px 6px 0; }
+  .warn strong { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>TamaClaudchi</h1>
+<p class="lede">A dashboard for watching several Claude Code agents at once. One Python
+file, plain HTML/CSS/JS, stdlib only, no build step, no dependencies, no external assets.
+This is the developer guide; see the README to run it.</p>
+
+<h2>Shape</h2>
+<pre><code>server.py       aggregation + HTTP (stdlib http.server)
+web/index.html  the page
+web/app.js      all rendering and interaction
+web/style.css   one token set, light + dark
+hooks/          optional Claude Code hook script</code></pre>
+<p>The frontend polls <code>/api/state</code> every 600&nbsp;ms; the server caches a built
+board for 250&nbsp;ms. Those two numbers <em>are</em> the lag between an agent changing
+state and the card saying so, so keep the cache below the poll.</p>
+
+<h2>Where the data comes from</h2>
+<table>
+  <tr><th>source</th><th>gives</th></tr>
+  <tr><td><code>~/.claude/sessions/&lt;pid&gt;.json</code></td><td>registry: pid, sessionId, cwd, status</td></tr>
+  <tr><td><code>tmux list-panes</code> + <code>ps</code></td><td>which pane each agent pid lives in</td></tr>
+  <tr><td><code>~/.claude/projects/&lt;slug&gt;/&lt;sid&gt;.jsonl</code></td><td>transcript: chat, model, tokens, title, MCP tools</td></tr>
+  <tr><td><code>~/.claude/tasks/&lt;sid&gt;/*.json</code></td><td>task list and dependency edges</td></tr>
+  <tr><td><code>~/.claude/agent-events/&lt;sid&gt;.jsonl</code></td><td>hook events (optional)</td></tr>
+  <tr><td><code>~/.claude.json</code></td><td>MCP servers configured per directory</td></tr>
+  <tr><td><code>tmux capture-pane</code></td><td><strong>live truth</strong>: spinner, permission mode, dialogs, sub-agent roster</td></tr>
+</table>
+<p>Written state, all user-owned and written atomically:
+<code>agent-manager-names.json</code> (renames),
+<code>agent-manager-artifacts.json</code> (pinned files),
+<code>agent-manager-spawns.json</code> (who launched whom).</p>
+
+<h2>Endpoints</h2>
+<p>All gated on the token — no exceptions.</p>
+<table>
+  <tr><th>GET</th><th></th></tr>
+  <tr><td><code>/api/state</code></td><td>the board; polled</td></tr>
+  <tr><td><code>/api/chat</code></td><td>one conversation, live or past</td></tr>
+  <tr><td><code>/api/history</code></td><td>past sessions; own 30&nbsp;s TTL, never in the poll</td></tr>
+  <tr><td><code>/api/artifacts</code>, <code>/api/browse</code></td><td>pinned files; path completion</td></tr>
+  <tr><td><code>/api/sessions</code>, <code>/api/debug</code></td><td>resumable sessions; why a session isn't on the board</td></tr>
+  <tr><th>POST</th><th></th></tr>
+  <tr><td><code>/api/send</code>, <code>/api/key</code></td><td>type into a pane; press one allowed key</td></tr>
+  <tr><td><code>/api/model</code>, <code>/api/mode</code></td><td>switch model; cycle permission mode</td></tr>
+  <tr><td><code>/api/spawn</code>, <code>/api/kill</code>, <code>/api/rename</code></td><td>lifecycle</td></tr>
+  <tr><td><code>/api/artifact-pin</code></td><td>watch a file or folder</td></tr>
+</table>
+
+<h2>Security model</h2>
+<p>One shared token gates every <code>/api/*</code> request. That single mechanism defeats
+CSRF, DNS-rebinding and shared-host snooping, chosen over layering Origin checks + CORS +
+content-type sniffing. It rides in the URL <em>fragment</em> (never sent on the wire) and
+comes back as <code>X-Auth-Token</code>.</p>
+<div class="warn">
+<strong>Non-negotiable when changing this code.</strong>
+<ul>
+  <li>Anything reaching tmux takes an <strong>allowlist</strong>, never free text:
+      <code>ALLOWED_KEYS</code>, <code>CYCLE_MODES</code>, <code>_MODEL_ID_RE</code>, the
+      <code>--resume</code> pattern, artifact extensions. Validate before the pane lookup.</li>
+  <li><code>read_artifact</code> and <code>/api/chat</code> resolve paths only from a list the
+      session itself produced — a whitelist by construction, not a prefix check.</li>
+  <li>Every subprocess call is list-form. No <code>shell=True</code>, no <code>eval</code>, ever.</li>
+  <li>Static files come only from <code>WEB_DIR + os.sep</code> (the trailing separator matters).</li>
+  <li>No outbound network calls, no external assets. Keep it airgap-clean.</li>
+  <li>MCP config is never echoed: <code>env</code>, <code>args</code> and URLs carry API keys,
+      so only a server's name and status are returned.</li>
+</ul>
+</div>
+<p><strong>Standing battery, before every push:</strong> unauthenticated request to every
+endpoint → 401; path traversal raw and URL-encoded → 404; injection into
+model / mode / key / resume / target → 400; malformed, oversized and non-object bodies → 400.</p>
+
+<h2>Testing</h2>
+<pre><code>python3 scratch/server-test.py   # pure functions, no tmux, no network
+node    scratch/render-test.js   # app.js in a vm with a DOM stub</code></pre>
+<p>Both are plain scripts with no framework. The render harness runs <code>app.js</code> in a
+<code>vm</code> context; note that top-level <code>const</code>/<code>let</code> are <em>not</em>
+on the vm global, so assign them by running code inside the same context.</p>
+<div class="warn">
+<strong>There is no headless browser here.</strong> Verify sprites by dumping them as ASCII
+grids and colours by computing contrast ratios — both are done throughout the tests. Never
+claim a visual change works without looking at something.
+</div>
+
+<h2>The mascot</h2>
+<p>Every axis encodes something real. Sprites are pixel maps in <code>app.js</code> on an
+18&times;16 grid.</p>
+<table>
+  <tr><td>body colour</td><td>git repo (or the folder, outside a repo) — worktrees of one repo share it</td></tr>
+  <tr><td>hat</td><td>the model: wizard&nbsp;/&nbsp;crown&nbsp;/&nbsp;poet&nbsp;/&nbsp;kitsune&nbsp;=&nbsp;Fable&nbsp;/&nbsp;Opus&nbsp;/&nbsp;Sonnet&nbsp;/&nbsp;Haiku</td></tr>
+  <tr><td>held item</td><td>git branch; <code>main</code> always gets the fairy wand</td></tr>
+  <tr><td>egg</td><td>no reply yet, so the model is unknown</td></tr>
+</table>
+<p>Hats occupy rows 0–3 (a few reach lower); items sit at x0–2 or x15–17, so the axes cannot
+collide. Eyes are drawn <em>before</em> hats so a hat can cover them. Items get an automatic
+dark rim (<code>haloOf</code>) — that is what keeps a pale item readable on a pale card.
+Colours and items are <em>assigned</em>, not hashed: the hash picks a preferred slot and
+collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</p>
+
+<h2>Hard-won knowledge</h2>
+<ul>
+  <li><strong>User turns are not always strings.</strong> Some are
+      <code>[{"type":"text"}]</code> lists. Both parsers handle that; tool results stay excluded.</li>
+  <li><strong>Dialogs must be read from the pane</strong>, not from hooks. Detection accepts a
+      <code>❯</code> cursor, an "Esc to cancel" line, or a yes-ish option — requiring "yes"
+      made every AskUserQuestion menu invisible.</li>
+  <li><strong>The mode footer is not the last line.</strong> Trailing rows ("/clear to save
+      488k tokens", the sub-agent roster) sit below it, so scan the last few lines upward.</li>
+  <li><strong>The composer is not the last line either</strong> — it is the bottom-most
+      <code>❯</code> line. Past user turns use the same marker.</li>
+  <li><strong>Transcript mtime is not activity.</strong> Claude Code rewrites untimestamped
+      bookkeeping records; sort on the newest <em>timestamped</em> record instead.</li>
+  <li><strong>A Task sub-agent's <code>tool_use</code> is only written once it finishes.</strong>
+      Live ones come from the pane's agent roster (<code>●&nbsp;main</code> /
+      <code>◯&nbsp;type</code>).</li>
+  <li><strong>tmux daemonises</strong>, so a spawned session's process parent is the tmux
+      server. Lineage must be recorded while both sessions are alive.</li>
+  <li><strong>A transcript record can be larger than any fixed head window</strong> (one starts
+      with a 205&nbsp;KB line). Read by lines, not bytes.</li>
+  <li><strong><code>/proc/&lt;pid&gt;</code> mtime is not process start time.</strong> Use field 22
+      of <code>/proc/&lt;pid&gt;/stat</code> plus uptime.</li>
+  <li><strong><code>&gt;&gt;</code> is a signed shift in JS.</strong> Hashes past 2³¹ go negative
+      and index arrays with <code>-3</code>. Use <code>&gt;&gt;&gt;</code>.</li>
+  <li><strong><code>input[type=number].selectionStart</code> is null</strong>, so restoring a
+      caret sends it to 0 and reverses typing. Do not rebuild a focused control at all.</li>
+  <li><strong>Same-specificity CSS is decided by file order.</strong> <code>.mascot</code>
+      silently overrode <code>.legend-pet</code> for weeks. Use <code>.mascot.legend-pet</code>.</li>
+  <li><strong>Agents on another host are invisible to <code>/proc</code> and tmux.</strong> A
+      session inside <code>srun</code> shares <code>~/.claude</code> only; it is surfaced
+      read-only.</li>
+</ul>
+
+<h2>Rendering rules</h2>
+<p>The poll rebuilds the board constantly, and replacing <code>innerHTML</code> destroys every
+piece of DOM state inside it — scroll positions, open <code>&lt;details&gt;</code>, text
+selection, the caret. So:</p>
+<ul>
+  <li>compare the markup first and <strong>skip the write entirely</strong> when nothing changed
+      (<code>lastBodyHtml</code>, <code>lastGridHtml</code>);</li>
+  <li>never rebuild a container while it holds the focus or a live selection;</li>
+  <li>update results in place rather than re-rendering controls the user is typing into;</li>
+  <li>keep exactly one scroll container per view — a scrollable box nested in a scrollable
+      panel traps the wheel and loses its position.</li>
+</ul>
+
+<h2>Working agreements</h2>
+<p>Minimalism, modularity, cleanliness, efficiency, safety. Prefer deleting to adding, keep
+data-driven tables over branching code, and run the dead-code sweep (unused JS/Python
+functions, unused CSS classes) plus the security battery before every push.</p>
+
+</body>
+</html>

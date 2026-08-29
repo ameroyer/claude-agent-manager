@@ -9,6 +9,14 @@ let editingName = false;  // pause head re-render while the rename input is open
 let lastPayload = "";
 let lastGridHtml = "";  // same idea as lastBodyHtml, for the shelf
 let spawnDir = "~/";  // server expands ~; refined from /api/state
+/* Past conversations — sessions that are no longer running. Fetched from its
+   own endpoint on a slow timer, never from the 1s board poll: building it walks
+   every project directory. */
+let history = [];
+let graveOpen = false;
+try { graveOpen = localStorage.tamaGrave === "1"; } catch { /* private mode */ }
+let graveFilter = {model: "", repo: "", text: "", minTok: "", maxTok: ""};
+let graveSort = "recent";  // "recent" | "name" | "tokens"
 
 // The server gates /api/* on this token; it rides in the URL fragment
 // (never sent on the wire by the browser) and on every request we make.
@@ -108,13 +116,14 @@ function fmtDuration(ts) {
    Every visual axis encodes something: colour = model, hat = git repo,
    held item = git branch, and the eyes/zzz follow the live state. */
 
-/* Monokai-pastel skins; "other" keeps the authentic clay Claude. */
+/* Model identity, used for the pill and the legend. The pet's BODY colour no
+   longer comes from here — colour means repo now, and the model is the hat. */
 const MODEL_SKIN = {
   fable:  {label: "Fable",  body: "#ff6188", outline: "#b23557"},
   opus:   {label: "Opus",   body: "#ab9df2", outline: "#7568b8"},
   sonnet: {label: "Sonnet", body: "#78dce8", outline: "#4899a5"},
   haiku:  {label: "Haiku",  body: "#a9dc76", outline: "#6f9c48"},
-  other:  {label: "Egg", body: "#d08b6c", outline: "#9a5c40"},  // model not known yet
+  other:  {label: "egg", body: "#d08b6c", outline: "#9a5c40"},
 };
 const MODEL_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
 
@@ -137,32 +146,52 @@ function hashStr(s) {
 }
 
 /* Three independent axes, so a pet's look tells you where it lives:
-     body colour = model   ·   HAT = git repo   ·   HELD ITEM = git branch
-   Agents in one repo wear the same hat; agents on one branch carry the same
-   item, so a shared branch reads across repos too (everyone on `main` holds
-   the same thing). Same repo AND branch = twins. Outside a git repo there is
-   no repo or branch to key on, so both axes fall back to the directory — which
-   keeps the promise that the same working dir looks the same.
-   The device tint follows the hat, so repo-mates read as a family. */
-const HAT_NAMES = ["crown", "helm", "hennin", "wizard", "halo", "flowers", "horns", "bow",
-                   "cap", "beanie", "tophat", "antenna", "laurel", "chef", "headphones", "mohawk"];
-const ITEM_NAMES = ["sword", "shield", "wand", "staff", "book", "lantern", "potion", "banner",
-                    "key", "orb", "axe", "longbow", "scroll", "hammer", "balloon", "feather"];
-const ACCENTS = ["#ffd866", "#ff6188", "#78dce8", "#ab9df2", "#fc9867", "#a9dc76", "#8fb8ff", "#ffa7c4"];
+     BODY COLOUR = git repo (or the folder, outside a repo)
+     HAT         = the model — a fixed, deliberately unmistakable hat each
+     HELD ITEM   = git branch
+   Repo-mates are the same colour and share the device tint; everyone on one
+   branch carries the same thing; the hat says which model is answering. */
+/* Bodies are deliberately saturated and mid-dark: the steel helm (#c7ced6),
+   white/bone items and gold all have to read clearly on top of every one of
+   them, so no pale or greyish entries here. */
+/* Sixteen pastels, evenly spaced around the hue wheel. Pastel bodies only work
+   if what sits on them is dark, so the knight's helm is iron rather than bright
+   steel — that way the colours stay soft and the hat still reads (contrast
+   2.8-6.0 against the helm, vs 1.9 the other way round). */
+const REPO_SKINS = [
+  {body: "#f794ad", outline: "#ad4e66"}, {body: "#f7a194", outline: "#ad5a4e"},
+  {body: "#f7c694", outline: "#ad7e4e"}, {body: "#f7eb94", outline: "#ada14e"},
+  {body: "#dff794", outline: "#96ad4e"}, {body: "#baf794", outline: "#72ad4e"},
+  {body: "#94f794", outline: "#4ead4e"}, {body: "#94f7ba", outline: "#4ead72"},
+  {body: "#94f7df", outline: "#4ead96"}, {body: "#94ebf7", outline: "#4ea1ad"},
+  {body: "#94c6f7", outline: "#4e7ead"}, {body: "#94a1f7", outline: "#4e5aad"},
+  {body: "#ad94f7", outline: "#664ead"}, {body: "#d294f7", outline: "#8a4ead"},
+  {body: "#f794f7", outline: "#ad4ead"}, {body: "#f794d2", outline: "#ad4e8a"},
+];
+const ITEM_NAMES = ["sword", "shield", "fairywand", "elfstaff", "spellbook", "lantern",
+                    "potion", "crystal", "mushroom", "acorn", "apple", "petleash",
+                    "leek", "teacup", "sunflower", "balloon", "lollipop", "umbrella",
+                    "scroll", "quill"];
+/* One hat per model, fixed — not hashed, so it is always readable. */
+const MODEL_HAT = {fable: "wizard", opus: "crown", sonnet: "poet", haiku: "kitsune",
+                   other: null};
 
-const hatKeyOf = a => a.git?.repo ? "repo:" + a.git.repo
-                                  : "dir:" + (a.cwd || a.sessionId || "");
+const repoKeyOf = a => a.git?.repo ? "repo:" + a.git.repo
+                                   : "dir:" + (a.cwd || a.sessionId || "");
 const itemKeyOf = a => a.git?.branch ? "branch:" + a.git.branch
                                      : "dir:" + (a.cwd || a.sessionId || "");
+/* The branch most sessions sit on deserves the nicest item, rather than
+   whatever the hash happens to land on. Reserved, so nothing else takes it. */
+const MAIN_BRANCHES = ["main", "master", "trunk"];
+const MAIN_ITEM = "fairywand";
+const isMainBranch = a => MAIN_BRANCHES.includes((a.git && a.git.branch) || "");
 
-/* Hashing a key straight onto a sprite collides far more than intuition says:
-   8 repos dropped into 8 hats have only a 0.2% chance of all coming out
-   different (birthday paradox), so shared hats were the norm, not bad luck.
-   The hash therefore only picks a *preferred* slot — a repo that wants one
-   already taken probes forward to the next free sprite. That makes outfits
-   genuinely distinct whenever the board holds no more repos (or branches) than
-   there are sprites. Keys are assigned in sorted order so the result depends
-   only on which agents are on the board, never on their arrival order. */
+/* Hashing a key straight onto a slot collides far more than intuition says:
+   8 keys dropped into 8 slots have only a 0.2% chance of all coming out
+   different (birthday paradox). The hash therefore only picks a *preferred*
+   slot — anything already taken probes forward to the next free one. Keys are
+   assigned in sorted order so the result depends only on which sessions are on
+   the board, never on their arrival order. */
 function assignSlots(keys, names) {
   const taken = new Array(names.length).fill(null);
   const out = {};
@@ -176,31 +205,32 @@ function assignSlots(keys, names) {
 }
 
 /* Recomputed only when the set of repos/branches on the board changes. */
-let _outfits = {key: null, hats: {}, items: {}, accents: {}};
+let _outfits = {key: null, colors: {}, items: {}};
 
 function outfitMap() {
-  const hatKeys = agents.map(hatKeyOf);
-  const itemKeys = agents.map(itemKeyOf);
-  const key = JSON.stringify([hatKeys, itemKeys]);
+  const all = agents.concat(history);  // past pets follow the same scheme
+  const repoKeys = all.map(repoKeyOf);
+  // main is handed the reserved item directly, so it is kept out of the pool
+  const itemKeys = all.filter(a => !isMainBranch(a)).map(itemKeyOf);
+  const key = JSON.stringify([repoKeys, itemKeys]);
   if (_outfits.key !== key) {
-    _outfits = {key, hats: assignSlots(hatKeys, HAT_NAMES),
-                items: assignSlots(itemKeys, ITEM_NAMES),
-                accents: assignSlots(hatKeys, ACCENTS)};
+    _outfits = {key, colors: assignSlots(repoKeys, REPO_SKINS),
+                items: assignSlots(itemKeys, ITEM_NAMES.filter(n => n !== MAIN_ITEM))};
   }
   return _outfits;
 }
 
 function critterOf(a) {
-  const model = (a.context_breakdown || {}).model;
-  const skin = MODEL_SKIN[modelFamily(model)];
-  const hk = hatKeyOf(a), ik = itemKeyOf(a);
-  const {hats, items, accents} = outfitMap();
+  const family = modelFamily((a.context_breakdown || {}).model);
+  const rk = repoKeyOf(a), ik = itemKeyOf(a);
+  const {colors, items} = outfitMap();
   // The fallbacks cover pets that aren't on the board (the brand mark).
-  const rh = hashStr(hk);
-  return {skin,
-          hat: hats[hk] || HAT_NAMES[rh % HAT_NAMES.length],
-          item: items[ik] || ITEM_NAMES[hashStr(ik) % ITEM_NAMES.length],
-          accent: accents[hk] || ACCENTS[(rh >>> 5) % ACCENTS.length]};  // >>> : >> goes negative past 2^31
+  const skin = colors[rk] || REPO_SKINS[hashStr(rk) % REPO_SKINS.length];
+  return {skin, family,
+          hat: MODEL_HAT[family],
+          item: isMainBranch(a) ? MAIN_ITEM
+              : items[ik] || ITEM_NAMES[hashStr(ik) % ITEM_NAMES.length],
+          accent: skin.body};
 }
 
 /* The pet IS the Claude Code creature: one big rectangle, two little arm nubs
@@ -218,17 +248,38 @@ const CREATURE = (() => {
   return c;
 })();
 
+/* Boundary cells of a sprite: a cell with a missing neighbour. Used for the
+   legend, where the body is drawn hollow so the hat is unmistakably the point. */
+function outlineOf(cells) {
+  const has = new Set(cells.map(([x, y]) => x + "," + y));
+  return cells.filter(([x, y]) =>
+    !has.has((x - 1) + "," + y) || !has.has((x + 1) + "," + y) ||
+    !has.has(x + "," + (y - 1)) || !has.has(x + "," + (y + 1)));
+}
+const CREATURE_OUTLINE = outlineOf(CREATURE);
+
+/* The empty cells touching a sprite. Drawn dark behind a held item, it gives
+   the item a crisp rim — which is both the cute pixel-art look and the reason a
+   pale item (parchment, a white plume) still reads against a pale card. */
+function haloOf(cells) {
+  const has = new Set(cells.map(([x, y]) => x + "," + y));
+  const out = new Set();
+  for (const [x, y] of cells) {
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const k = (x + dx) + "," + (y + dy);
+      if (!has.has(k)) out.add(k);
+    }
+  }
+  return [...out].map(k => k.split(",").map(Number));
+}
+
 const CLR = {A: null, G: "#ffd866", S: "#c7ced6", W: "#fdf6ee", D: "#9a6b3f",
-             E: "#2d2a2e", z: "#78dce8"};
+             E: "#2d2a2e", P: "#5b53c9", R: "#e0453f", K: "#2a2730",
+             N: "#7fbf4d", C: "#5fc9e0", I: "#4f5a6b", B: "#8c5a3c"};
 const paint = (role, accent) => CLR[role] || accent;
 
 // The eyes never change: two 1×2 rectangular pupils. Idle just dreams in zzz.
 const EYES = [[6,6,"E"],[6,7,"E"],[11,6,"E"],[11,7,"E"]];
-// Sleeping. Three loose pixels just read as a blue diagonal scratch, so this is
-// an actual "z" glyph. Top-left corner, above every held item.
-const ZZZ = [[0,0,"z"],[1,0,"z"],[2,0,"z"],
-             [1,1,"z"],
-             [0,2,"z"],[1,2,"z"],[2,2,"z"]];
 
 // Before the first reply the model is unknown — the pet is still an egg.
 const EGG = (() => {
@@ -241,116 +292,162 @@ const EGG = (() => {
 })();
 const EGG_SPECKLES = [[8,3,"W"],[6,8,"W"],[11,5,"W"],[9,10,"W"]];
 
-// Sprites: [x, y, role] — G gold, S steel, W white/bone, D wood, A repo accent.
-// Hats sit in rows 0-3 above the head; items are held at the arms (rows 0-9,
-// x0-2 left / x15-17 right) so the two axes can never collide.
+// Sprites: [x, y, role] — G gold, S steel, W white/bone, D wood, E/K dark,
+// P wizard indigo, R red. One hat per model, and they may reach down over the
+// head (the helm's visor, the kitsune mask) — eyes are drawn BEFORE hats so a
+// hat can cover them.
 const HAT = {
-  crown:   [[5,2,"G"],[8,2,"G"],[11,2,"G"],
-            [5,3,"G"],[6,3,"G"],[7,3,"A"],[8,3,"G"],[9,3,"G"],[10,3,"A"],[11,3,"G"],[12,3,"G"]],
-  helm:    [[8,0,"A"],[8,1,"A"],[9,1,"A"],
-            [5,2,"S"],[6,2,"S"],[7,2,"S"],[8,2,"S"],[9,2,"S"],[10,2,"S"],[11,2,"S"],[12,2,"S"],
-            [5,3,"S"],[6,3,"S"],[11,3,"S"],[12,3,"S"]],
-  hennin:  [[10,0,"A"],[9,1,"A"],[10,1,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
-            [8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],
-            [11,0,"W"],[12,1,"W"],[13,2,"W"]],                      // cone + veil
-  wizard:  [[8,0,"G"],[8,1,"A"],[9,1,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],
-            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"]],
-  halo:    [[7,1,"G"],[8,1,"G"],[9,1,"G"],[10,1,"G"]],
-  flowers: [[5,3,"A"],[6,3,"W"],[7,3,"A"],[8,3,"W"],[9,3,"A"],[10,3,"W"],[11,3,"A"],[12,3,"W"],
-            [6,2,"A"],[9,2,"W"],[12,2,"A"]],
-  horns:   [[3,1,"W"],[4,2,"W"],[4,3,"W"],[14,1,"W"],[13,2,"W"],[13,3,"W"]],
-  bow:     [[7,1,"A"],[7,2,"A"],[10,1,"A"],[10,2,"A"],[8,2,"G"],[9,2,"G"],[8,3,"A"],[9,3,"A"]],
-  cap:     [[6,2,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
-            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],
-            [12,3,"W"],[13,3,"W"],[14,3,"W"]],                    // dome + brim
-  beanie:  [[8,1,"W"],[9,1,"W"],                                  // bobble, sat on the dome
-            [6,2,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
-            [5,3,"W"],[6,3,"W"],[7,3,"W"],[8,3,"W"],[9,3,"W"],[10,3,"W"],[11,3,"W"],[12,3,"W"]],
-  tophat:  [[6,0,"A"],[7,0,"A"],[8,0,"A"],[9,0,"A"],[10,0,"A"],[11,0,"A"],
-            [6,1,"A"],[7,1,"A"],[8,1,"A"],[9,1,"A"],[10,1,"A"],[11,1,"A"],
-            [6,2,"G"],[7,2,"G"],[8,2,"G"],[9,2,"G"],[10,2,"G"],[11,2,"G"],   // band
-            [4,3,"A"],[5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],
-            [10,3,"A"],[11,3,"A"],[12,3,"A"],[13,3,"A"]],
-  antenna: [[5,0,"G"],[12,0,"G"],[5,1,"S"],[12,1,"S"],[6,2,"S"],[11,2,"S"],
-            [7,3,"S"],[8,3,"S"],[9,3,"S"],[10,3,"S"]],            // bulbs on stalks
-  laurel:  [[3,3,"A"],[4,2,"A"],[5,1,"A"],[6,1,"A"],
-            [14,3,"A"],[13,2,"A"],[12,1,"A"],[11,1,"A"],
-            [8,1,"G"],[9,1,"G"]],                                 // wreath + gem
-  chef:    [[6,0,"W"],[7,0,"W"],[9,0,"W"],[10,0,"W"],             // puffs
-            [6,1,"W"],[7,1,"W"],[8,1,"W"],[9,1,"W"],[10,1,"W"],[11,1,"W"],
-            [6,2,"W"],[7,2,"W"],[8,2,"W"],[9,2,"W"],[10,2,"W"],[11,2,"W"],
-            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"]],
-  headphones: [[4,1,"S"],[5,1,"S"],[6,1,"S"],[7,1,"S"],[8,1,"S"],[9,1,"S"],
-            [10,1,"S"],[11,1,"S"],[12,1,"S"],[13,1,"S"],          // band
-            [3,2,"S"],[3,3,"A"],[14,2,"S"],[14,3,"A"]],           // ear cups
-  mohawk:  [[6,1,"A"],[8,1,"A"],[10,1,"A"],                       // spikes, not a cone
-            [6,2,"A"],[7,2,"A"],[8,2,"A"],[9,2,"A"],[10,2,"A"],[11,2,"A"],
-            [5,3,"A"],[6,3,"A"],[7,3,"A"],[8,3,"A"],[9,3,"A"],[10,3,"A"],[11,3,"A"],[12,3,"A"]],
+  // Fable — tall pointed wizard cone, gold star on the tip, stars on the cloth
+  wizard:  [[8,0,"G"],
+            [8,1,"P"],[9,1,"P"],
+            [7,2,"P"],[8,2,"G"],[9,2,"P"],[10,2,"P"],
+            [6,3,"P"],[7,3,"P"],[8,3,"P"],[9,3,"G"],[10,3,"P"],[11,3,"P"],
+            [4,4,"P"],[5,4,"G"],[6,4,"P"],[7,4,"P"],[8,4,"P"],[9,4,"P"],
+            [10,4,"P"],[11,4,"G"],[12,4,"P"],[13,4,"P"]],
+  // Opus — a diadem rather than a helm: the knight's visor was the least cute
+  // thing on the shelf. Gold band, three points, a jewel in each.
+  crown:   [[4,3,"G"],[5,3,"G"],[6,3,"G"],[7,3,"G"],[8,3,"G"],[9,3,"G"],
+            [10,3,"G"],[11,3,"G"],[12,3,"G"],[13,3,"G"],             // band
+            [5,2,"G"],[8,2,"G"],[9,2,"G"],[12,2,"G"],                // points
+            [5,1,"C"],[8,1,"R"],[9,1,"R"],[12,1,"C"],                // jewels
+            [6,3,"P"],[11,3,"P"]],                                   // inset gems
+  // Sonnet — wide-brimmed poet's hat, black, with a white quill
+  poet:    [[7,1,"K"],[8,1,"K"],[9,1,"K"],[10,1,"K"],
+            [6,2,"K"],[7,2,"K"],[8,2,"K"],[9,2,"K"],[10,2,"K"],[11,2,"K"],
+            [3,3,"K"],[4,3,"K"],[5,3,"K"],[6,3,"K"],[7,3,"K"],[8,3,"K"],
+            [9,3,"K"],[10,3,"K"],[11,3,"K"],[12,3,"K"],[13,3,"K"],[14,3,"K"],
+            [13,0,"W"],[12,1,"W"],[13,1,"W"],[12,2,"W"]],          // quill
+  // Haiku — fox mask pushed to the side of the head, not over the eyes
+  kitsune: [[2,1,"K"],[5,1,"K"],                                   // ear tips
+            [2,2,"W"],[5,2,"W"],
+            [1,3,"K"],[2,3,"W"],[3,3,"W"],[4,3,"W"],[5,3,"W"],[6,3,"K"],
+            [1,4,"K"],[2,4,"W"],[3,4,"R"],[4,4,"R"],[5,4,"W"],[6,4,"K"],
+            [1,5,"K"],[2,5,"W"],[3,5,"W"],[4,5,"W"],[5,5,"W"],[6,5,"K"],
+            [2,6,"K"],[3,6,"W"],[4,6,"R"],[5,6,"K"]],               // rimmed snout
 };
 
+/* Cute fantasy kit. Right hand x15-17, off-hand x0-2, rows 0-9. Every item is
+   rimmed automatically (see ITEM_HALO), so shapes matter more than colours. */
 const ITEM = {
-  sword:   [[16,0,"W"],[16,1,"S"],[16,2,"S"],[16,3,"S"],[16,4,"S"],[16,5,"S"],
-            [15,6,"G"],[16,6,"G"],[17,6,"G"],[16,7,"D"]],
-  shield:  [[0,5,"S"],[1,5,"S"],[0,6,"S"],[1,6,"S"],[0,7,"S"],[1,7,"A"],
-            [0,8,"S"],[1,8,"S"],[0,9,"S"],[1,9,"S"]],               // off-hand
-  wand:    [[16,2,"G"],[15,3,"G"],[16,3,"G"],[17,3,"G"],
-            [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"]],
-  staff:   [[16,0,"A"],[15,1,"A"],[16,1,"A"],[17,1,"A"],[16,2,"A"],
-            [16,3,"D"],[16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
-  book:    [[16,5,"A"],[17,5,"A"],[16,6,"A"],[17,6,"W"],[16,7,"A"],[17,7,"W"],[16,8,"A"],[17,8,"W"]],
-  lantern: [[16,3,"D"],[16,4,"D"],
-            [15,5,"G"],[16,5,"G"],[17,5,"G"],[15,6,"G"],[16,6,"W"],[17,6,"G"],
-            [15,7,"G"],[16,7,"W"],[17,7,"G"],[15,8,"G"],[16,8,"G"],[17,8,"G"]],
-  potion:  [[16,3,"D"],[16,4,"W"],[16,5,"W"],
-            [16,6,"A"],[17,6,"A"],[16,7,"A"],[17,7,"A"],[16,8,"A"],[17,8,"A"]],
-  banner:  [[16,1,"D"],[16,2,"D"],[16,3,"D"],[16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"],
-            [17,1,"A"],[17,2,"A"],[17,3,"A"],[17,4,"A"]],
-  key:     [[16,2,"G"],[15,3,"G"],[17,3,"G"],[16,4,"G"],                 // ring
-            [16,5,"G"],[16,6,"G"],[16,7,"G"],[16,8,"G"],
-            [17,6,"G"],[17,8,"G"]],                                      // teeth
-  orb:     [[16,3,"A"],[15,4,"A"],[16,4,"W"],[17,4,"A"],
-            [15,5,"A"],[16,5,"A"],[17,5,"A"],[16,6,"A"]],
-  axe:     [[16,1,"S"],[17,1,"S"],[15,2,"S"],[16,2,"S"],[17,2,"S"],[15,3,"S"],[16,3,"S"],
-            [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
-  longbow: [[1,3,"D"],[0,4,"D"],[0,5,"D"],[0,6,"D"],[0,7,"D"],[1,8,"D"],   // off-hand
-            [2,3,"W"],[2,4,"W"],[2,5,"W"],[2,6,"W"],[2,7,"W"],[2,8,"W"]],  // string
-  scroll:  [[15,4,"W"],[16,4,"W"],[17,4,"W"],
-            [15,5,"D"],[16,5,"W"],[17,5,"D"],
-            [15,6,"D"],[16,6,"W"],[17,6,"D"],
-            [15,7,"W"],[16,7,"W"],[17,7,"W"]],
-  hammer:  [[15,2,"S"],[16,2,"S"],[17,2,"S"],[15,3,"S"],[16,3,"S"],[17,3,"S"],
-            [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
-  balloon: [[16,0,"A"],[15,1,"A"],[16,1,"A"],[17,1,"A"],
-            [15,2,"A"],[16,2,"A"],[17,2,"A"],[16,3,"A"],
-            [16,4,"W"],[16,5,"W"],[16,6,"W"],[16,7,"W"]],                // string
-  feather: [[17,1,"W"],[16,2,"W"],[17,2,"W"],[16,3,"W"],[17,3,"W"],[16,4,"W"],
-            [16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],                // quill
+  sword:     [[16,0,"W"],[16,1,"S"],[16,2,"S"],[16,3,"S"],[16,4,"S"],[16,5,"S"],
+              [15,6,"G"],[16,6,"G"],[17,6,"G"],[16,7,"D"],[16,8,"D"]],
+  shield:    [[0,5,"S"],[1,5,"S"],[0,6,"S"],[1,6,"A"],[0,7,"S"],[1,7,"A"],
+              [0,8,"S"],[1,8,"S"],[0,9,"S"],[1,9,"S"]],
+  fairywand: [[16,0,"G"],[15,1,"G"],[16,1,"G"],[17,1,"G"],[16,2,"G"],
+              [15,3,"G"],[17,3,"G"],                                  // sparkles
+              [16,4,"P"],[16,5,"P"],[16,6,"P"],[16,7,"P"],[16,8,"P"]],
+  elfstaff:  [[16,0,"N"],[15,1,"N"],[16,1,"N"],[17,1,"N"],            // leaves
+              [16,2,"G"],                                             // gem
+              [16,3,"D"],[16,4,"D"],[15,5,"N"],[16,5,"D"],
+              [16,6,"D"],[16,7,"D"],[16,8,"D"]],
+  spellbook: [[15,4,"P"],[16,4,"P"],[17,4,"P"],
+              [15,5,"P"],[16,5,"G"],[17,5,"P"],
+              [15,6,"P"],[16,6,"P"],[17,6,"P"],
+              [15,7,"W"],[16,7,"W"],[17,7,"W"]],
+  lantern:   [[16,2,"D"],[16,3,"D"],
+              [15,4,"S"],[16,4,"S"],[17,4,"S"],
+              [15,5,"G"],[16,5,"W"],[17,5,"G"],
+              [15,6,"G"],[16,6,"W"],[17,6,"G"],
+              [15,7,"S"],[16,7,"S"],[17,7,"S"]],
+  potion:    [[16,2,"D"],[16,3,"W"],
+              [15,4,"C"],[16,4,"C"],[17,4,"C"],
+              [15,5,"C"],[16,5,"W"],[17,5,"C"],
+              [15,6,"C"],[16,6,"C"],[17,6,"C"]],
+  crystal:   [[16,2,"C"],
+              [15,3,"C"],[16,3,"W"],[17,3,"C"],
+              [15,4,"C"],[16,4,"C"],[17,4,"C"],
+              [15,5,"C"],[16,5,"C"],[17,5,"C"],
+              [16,6,"C"]],
+  mushroom:  [[15,3,"R"],[16,3,"R"],[17,3,"R"],
+              [15,4,"R"],[16,4,"W"],[17,4,"R"],
+              [15,5,"R"],[16,5,"R"],[17,5,"R"],
+              [16,6,"W"],[16,7,"W"],[16,8,"W"]],
+  acorn:     [[15,3,"D"],[16,3,"D"],[17,3,"D"],
+              [15,4,"B"],[16,4,"B"],[17,4,"B"],
+              [15,5,"B"],[16,5,"B"],[17,5,"B"],
+              [16,6,"B"],[16,2,"D"]],
+  apple:     [[16,2,"D"],[17,2,"N"],
+              [15,3,"R"],[16,3,"R"],[17,3,"R"],
+              [15,4,"R"],[16,4,"W"],[17,4,"R"],
+              [15,5,"R"],[16,5,"R"],[17,5,"R"],
+              [16,6,"R"]],
+  petleash:  [[2,2,"D"],[2,3,"D"],[1,4,"D"],
+              [0,5,"K"],[1,5,"K"],
+              [0,6,"A"],[1,6,"A"],[0,7,"A"],[1,7,"A"],
+              [0,8,"K"],[1,8,"K"]],
+  leek:      [[15,0,"N"],[17,0,"N"],[15,1,"N"],[16,1,"N"],[17,1,"N"],
+              [16,2,"N"],[16,3,"N"],
+              [16,4,"W"],[16,5,"W"],[16,6,"W"],[16,7,"W"],[16,8,"W"]],
+  teacup:    [[17,1,"W"],[16,2,"W"],
+              [15,4,"W"],[16,4,"W"],[17,4,"W"],
+              [15,5,"W"],[16,5,"W"],[17,5,"W"],
+              [15,6,"S"],[16,6,"S"],[17,6,"S"]],
+  sunflower: [[15,2,"G"],[16,2,"G"],[17,2,"G"],
+              [15,3,"G"],[16,3,"D"],[17,3,"G"],
+              [15,4,"G"],[16,4,"G"],[17,4,"G"],
+              [16,5,"N"],[16,6,"N"],[17,6,"N"],[16,7,"N"],[16,8,"N"]],
+  balloon:   [[16,0,"A"],[15,1,"A"],[16,1,"A"],[17,1,"A"],
+              [15,2,"A"],[16,2,"A"],[17,2,"A"],[16,3,"A"],
+              [16,4,"W"],[16,5,"W"],[16,6,"W"],[16,7,"W"]],
+  lollipop:  [[16,1,"R"],
+              [15,2,"R"],[16,2,"W"],[17,2,"R"],
+              [15,3,"R"],[16,3,"R"],[17,3,"R"],
+              [16,4,"R"],
+              [16,5,"W"],[16,6,"W"],[16,7,"W"],[16,8,"W"]],
+  umbrella:  [[16,1,"R"],[15,2,"R"],[16,2,"R"],[17,2,"R"],
+              [15,3,"R"],[16,3,"R"],[17,3,"R"],
+              [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[17,8,"D"],[16,8,"D"]],
+  scroll:    [[15,3,"D"],[16,3,"D"],[17,3,"D"],
+              [15,4,"W"],[16,4,"W"],[17,4,"W"],
+              [15,5,"W"],[16,5,"W"],[17,5,"W"],
+              [15,6,"W"],[16,6,"W"],[17,6,"W"],
+              [15,7,"D"],[16,7,"D"],[17,7,"D"]],
+  quill:     [[17,1,"W"],[16,2,"W"],[17,2,"W"],[16,3,"W"],[17,3,"W"],[16,4,"W"],
+              [16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
 };
 
-function mascotSvg(a, cls = "") {
-  const {skin, hat, item, accent} = critterOf(a);
+/* Rim for each item, computed once. */
+const ITEM_HALO = Object.fromEntries(
+  Object.entries(ITEM).map(([name, cells]) => [name, haloOf(cells)]));
+
+function mascotSvg(a, cls = "", opts = {}) {
+  const c = critterOf(a);
+  const {hat, item, accent} = c;
+  const skin = opts.skin || c.skin;
   const px = [];
   const cell = (x, y, c) =>
     px.push(`<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${c}"/>`);
   if (!(a.context_breakdown || {}).model) {  // no reply yet: an egg, no outfit
     EGG.forEach(([x, y]) => cell(x, y, skin.body));
     EGG_SPECKLES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+    EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
   } else {
-    CREATURE.forEach(([x, y, r]) => cell(x, y, r === "T" ? skin.body : skin.outline));
+    if (opts.hollow) {
+      CREATURE_OUTLINE.forEach(([x, y]) => cell(x, y, skin.outline));
+    } else {
+      CREATURE.forEach(([x, y, r]) => cell(x, y, r === "T" ? skin.body : skin.outline));
+    }
+    EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
     (HAT[hat] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
-    (ITEM[item] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+    if (!opts.hideItem) {
+      (ITEM_HALO[item] || []).forEach(([x, y]) => cell(x, y, CLR.K));
+      (ITEM[item] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
+    }
   }
-  EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
-  if (a.state === "idle") ZZZ.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
   return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${cls}"
     viewBox="0 0 18 14.2" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
     aria-hidden="true">${px.join("")}</svg>`;
 }
 
+const LEGEND_SKIN = {body: "#cfc9d6", outline: "#9a94a3"};
+
 function legendHtml() {
-  return `<div class="legend" title="Pet colour = model · hat = git repo (or folder, outside a repo) · held item = git branch. Egg = no reply yet, so the model is unknown.">
+  return `<div class="legend" title="Hat = model · body colour = git repo (or folder) · held item = git branch. An egg means no reply yet, so the model is still unknown.">
     ${MODEL_ORDER.map(k => `<span class="legend-item">
-      <span class="legend-dot" style="background:${MODEL_SKIN[k].body}"></span>${MODEL_SKIN[k].label}</span>`).join("")}
+      ${mascotSvg({state: "idle", sessionId: "legend-" + k, cwd: "/legend",
+                   context_breakdown: k === "other" ? null : {model: k}}, "legend-pet",
+                  {skin: LEGEND_SKIN, hollow: true, hideItem: true})}
+      ${MODEL_SKIN[k].label}</span>`).join("")}
   </div>`;
 }
 
@@ -653,7 +750,10 @@ const CTX_PARTS = [
 /* Detailed token breakdown of the last turn (Overview section). */
 function contextDetailHtml(a) {
   const b = a.context_breakdown;
-  if (!b) return "";
+  // A past session knows its final size but not how it split across the usage
+  // buckets, so there is nothing to chart — only draw this when a real split
+  // exists, or every bar reads zero.
+  if (!b || !a.context_tokens || !CTX_PARTS.some(p => b[p.key])) return "";
   const total = a.context_tokens || 1;
   const win = a.context_window;
   const segs = CTX_PARTS.map(p => {
@@ -728,6 +828,34 @@ function subagentsSectionHtml(a) {
   </div>`;
 }
 
+/* The parent's own pet, inline next to "from ↳". Hovering it highlights the
+   parent's card, so the link is visible rather than a name you have to match
+   up by eye. */
+function parentPetHtml(a) {
+  const parent = agents.find(x => x.sessionId === a.spawned_by_sid);
+  if (!parent) return "";
+  return `<span class="lineage-pet" data-parent="${esc(parent.sessionId)}"
+    title="Launched by ${esc(parent.display_name || parent.name)} — hover to find its card">${
+    mascotSvg(parent, "lineage-mascot", {hideItem: true})}</span>`;
+}
+
+/* The three lamps used to be status / context level / repo family. Status is
+   already said three other ways on this card, and the repo is now the card's own
+   colour, so two of them said nothing. They are one gauge instead: five lamps
+   filled in proportion to the context window used, coloured by how full it is. */
+const GAUGE_LAMPS = 5;
+
+function contextGaugeHtml(a) {
+  const c = contextInfo(a);
+  const lit = c ? Math.max(1, Math.ceil(c.pct / (100 / GAUGE_LAMPS))) : 0;
+  return `<div class="tama-buttons" title="${esc(c
+      ? `Context used: ${c.label} (${c.pct}%) — ${lit} of ${GAUGE_LAMPS} lamps`
+      : "Context: nothing measured yet")}">
+    ${Array.from({length: GAUGE_LAMPS}, (_, i) =>
+      `<span class="led ${i < lit ? "lit " + c.level : "off"}"></span>`).join("")}
+  </div>`;
+}
+
 function cardHtml(a) {
   const tasks = a.tasks || [];
   const done = tasks.filter(t => t.status === "completed").length;
@@ -743,7 +871,7 @@ function cardHtml(a) {
     : summaryLine(a) || STATE_LABEL[a.state] || a.state;
 
   return `<div class="card tama ${esc(a.state)}${a.spawned_by ? " child" : ""}" data-sid="${esc(a.sessionId)}"
-    style="--pet-accent:${accent};--model-tint:${model.body}">
+    style="--pet-accent:${accent};--card-tint:${accent}">
     <div class="tama-screen">
       <div class="tama-top">
         <span class="state-ico ${esc(a.state)}" title="${STATE_LABEL[a.state] || ""}">${STATE_ICON[a.state] || "○"}</span>
@@ -758,7 +886,9 @@ function cardHtml(a) {
       <div class="tama-mid">
         <div class="tama-stats">
           ${ctx ? `<div class="stat-big ${ctx.level}" title="Context window used: ${ctx.label}. Higher = closer to compacting.">
-            <span class="stat-num">${ctx.pct}</span><span class="stat-unit">% ctx</span></div>` : ""}
+            <span class="stat-pair"><span class="stat-num">${ctx.pct}%</span><span class="stat-unit">ctx</span></span>
+            <span class="stat-pair"><span class="stat-num">${fmtTokens(a.context_tokens)}</span><span class="stat-unit">tokens</span></span>
+          </div>` : ""}
           <div class="stat-sub" title="${done}/${total} tasks done">${total ? `${done}/${total} tasks` : "no tasks"}</div>
           <div class="stat-sub state-word ${esc(a.state)}">${STATE_LABEL[a.state] || esc(a.state)}</div>
         </div>
@@ -768,16 +898,13 @@ function cardHtml(a) {
       ${subagentsHtml(a)}
       ${approvalActionsHtml(a)}
     </div>
-    <div class="tama-buttons">
-      <span class="led st-${esc(a.state)}" title="Status light: ${STATE_LABEL[a.state] || ""}"></span>
-      <span class="led ctx-${ctx ? ctx.level : "off"}" title="Context light: ${ctx ? `${ctx.label} used (${ctx.pct}%)` : "no data yet"}"></span>
-      <span class="led led-repo" title="Family light: same colour = same repo"></span>
-    </div>
+    ${contextGaugeHtml(a)}
     <div class="shell-meta">
       ${a.git ? `<div title="Repository ${esc(a.git.repo)}${a.git.worktree ? `, linked worktree ${esc(a.git.worktree)}` : ""} · branch ${esc(a.git.branch)} @ commit ${esc(a.git.commit)}"><b>git</b> ${esc(a.git.repo)} · ${esc(a.git.branch)} @ ${esc(a.git.commit)}</div>` : ""}
       <div title="Session started ${esc(whenAbs(a.startedAt))} — id ${esc(a.sessionId)}">
         <b>born</b> ${ago(a.startedAt)} <span class="sid">#${esc((a.sessionId || "").slice(0, 8))}</span></div>
-      ${a.spawned_by ? `<div class="lineage" title="This session didn't start on its own — ${esc(a.spawned_by)} launched it."><b>from</b> ↳ ${esc(a.spawned_by)}</div>` : ""}
+      ${a.spawned_by ? `<div class="lineage" title="This session didn't start on its own — ${esc(a.spawned_by)} launched it.">
+        <b>from</b> ↳ ${parentPetHtml(a)}${esc(a.spawned_by)}</div>` : ""}
       ${(a.spawns || []).length ? `<div class="lineage" title="Sessions this agent launched: ${esc(a.spawns.join(", "))}"><b>spawns</b> ${esc(a.spawns.join(", "))}</div>` : ""}
     </div>
     <div class="tama-foot">
@@ -786,8 +913,149 @@ function cardHtml(a) {
              title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)} — click to change">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</button>`
         : `<span class="mode-chip" title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>`) : ""}
       ${a.tmux ? `<span class="tmux-tag"
-         title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>` : ""}
+         title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>`
+       : a.remote ? `<span class="tmux-tag remote"
+         title="This session runs on another machine (a Slurm allocation, or any host sharing ~/.claude). Its files are visible here; its tmux pane is not, so it can't be driven from this dashboard.">elsewhere</span>` : ""}
       <span class="time" title="Last message in this conversation">${ago(a.last_activity)}</span>
+    </div>
+  </div>`;
+}
+
+/* Lay the cemetery out as families: a session that launched others is shown
+   full size with its children half size beside it. Lineage is only known for
+   pairs the dashboard saw while both were alive (tmux daemonises, so nothing on
+   disk connects them afterwards); everything else is a plain headstone. */
+function graveFamilies(list) {
+  const present = new Set(list.map(a => a.sessionId));
+  const kids = new Map();
+  for (const a of list) {
+    if (a.spawned_by_sid && present.has(a.spawned_by_sid) && a.spawned_by_sid !== a.sessionId) {
+      if (!kids.has(a.spawned_by_sid)) kids.set(a.spawned_by_sid, []);
+      kids.get(a.spawned_by_sid).push(a);
+    }
+  }
+  const claimed = new Set([].concat(...[...kids.values()]).map(a => a.sessionId));
+  return list.filter(a => !claimed.has(a.sessionId))
+             .map(a => ({parent: a, children: kids.get(a.sessionId) || []}));
+}
+
+function graveFamilyHtml(fam) {
+  if (!fam.children.length) return graveCardHtml(fam.parent);
+  return `<div class="grave-family" title="${esc(fam.parent.display_name)} and the ${
+    fam.children.length} session${fam.children.length === 1 ? "" : "s"} it launched">
+    ${graveCardHtml(fam.parent)}
+    <div class="grave-kids">${fam.children.map(c => graveCardHtml(c, true)).join("")}</div>
+  </div>`;
+}
+
+/* Cemetery filters: model, repo/folder, and a free-text match on the name and
+   path. All client-side — the whole list is already in memory. */
+function graveRepoOf(a) {
+  return (a.git && a.git.repo) || a.project || a.cwd || "";
+}
+
+function graveMatches(a) {
+  const f = graveFilter;
+  if (f.model && modelFamily((a.context_breakdown || {}).model) !== f.model) return false;
+  if (f.repo && graveRepoOf(a) !== f.repo) return false;
+  if (f.text) {
+    const hay = `${a.display_name} ${a.cwd} ${(a.git && a.git.branch) || ""}`.toLowerCase();
+    if (!hay.includes(f.text.toLowerCase())) return false;
+  }
+  // Token range, in thousands. A conversation whose size we never recovered is
+  // excluded as soon as you ask for a range at all — it cannot satisfy one.
+  const lo = parseFloat(f.minTok), hi = parseFloat(f.maxTok);
+  if (!isNaN(lo) || !isNaN(hi)) {
+    if (!a.tokens) return false;
+    if (!isNaN(lo) && a.tokens < lo * 1000) return false;
+    if (!isNaN(hi) && a.tokens > hi * 1000) return false;
+  }
+  return true;
+}
+
+/* Re-filter without touching the controls. Rebuilding the whole grid on each
+   keystroke destroyed the focused input: input[type=number] reports a null
+   selectionStart, so restoring the caret sent it to position 0 and typing "10"
+   came out "01", and a select-all was wiped before the key landed. */
+/* Cemetery order. The server hands them over newest-death-first; these re-sort
+   client-side, so switching costs nothing. */
+const GRAVE_SORTS = {
+  recent: {label: "last seen",
+           cmp: (a, b) => (b.last_activity || 0) - (a.last_activity || 0)},
+  name: {label: "name (A-Z)",
+         cmp: (a, b) => (a.display_name || "").toLowerCase()
+                          .localeCompare((b.display_name || "").toLowerCase())},
+  tokens: {label: "tokens (most first)",
+           cmp: (a, b) => (b.tokens || 0) - (a.tokens || 0)},
+};
+
+function graveSorted(list) {
+  return list.slice().sort(GRAVE_SORTS[graveSort].cmp);
+}
+
+function refreshGraveResults() {
+  const gridEl = grid.querySelector(".grave-grid");
+  if (!gridEl) return;
+  const shown = graveSorted(history.filter(graveMatches));
+  gridEl.innerHTML = graveFamilies(shown).map(graveFamilyHtml).join("")
+    || '<div class="empty">Nothing matches that filter.</div>';
+  const count = grid.querySelector(".grave-count");
+  if (count) count.textContent = `${shown.length} of ${history.length}`;
+}
+
+function graveFilterHtml(shown, total) {
+  const repos = [...new Set(history.map(graveRepoOf))].filter(Boolean).sort();
+  const models = MODEL_ORDER.filter(m =>
+    history.some(a => modelFamily((a.context_breakdown || {}).model) === m));
+  const opt = (v, label, cur) =>
+    `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(label)}</option>`;
+  return `<div class="grave-filter">
+    <input class="grave-search" placeholder="filter by name, path or branch…"
+      value="${esc(graveFilter.text)}" spellcheck="false">
+    <select class="grave-model">${opt("", "any model", graveFilter.model)}
+      ${models.map(m => opt(m, MODEL_SKIN[m].label, graveFilter.model)).join("")}</select>
+    <select class="grave-repo">${opt("", "any repo", graveFilter.repo)}
+      ${repos.map(r => opt(r, r, graveFilter.repo)).join("")}</select>
+    <select class="grave-sort">${Object.entries(GRAVE_SORTS)
+      .map(([k, v]) => opt(k, "sort: " + v.label, graveSort)).join("")}</select>
+    <span class="grave-tok">
+      <input class="grave-min" type="number" min="0" step="10" placeholder="min"
+        value="${esc(graveFilter.minTok)}">–<input class="grave-max" type="number"
+        min="0" step="10" placeholder="max" value="${esc(graveFilter.maxTok)}">k tok
+    </span>
+    <span class="grave-count">${shown} of ${total}</span>
+    <button class="grave-clear">clear</button>
+  </div>`;
+}
+
+/* Faces for the epitaph. Picked from the session id rather than at random, so a
+   given pet keeps its expression instead of twitching on every re-render. */
+const EPITAPH_FACES = ["^_^", ":)", ";)", "u_u", "o_o", "-_-", "x_x", "~_~",
+                       "._.", "o7", "*_*", "n_n"];
+
+function epitaphFace(sid) {
+  return EPITAPH_FACES[hashStr(sid || "") % EPITAPH_FACES.length];
+}
+
+/* A past session: a headstone rather than a handheld — the pet, who it was,
+   where it lived, the two dates, and an epitaph carrying the session id you
+   need to resume it. */
+function graveCardHtml(a, small) {
+  const accent = critterOf(a).accent;
+  const model = MODEL_SKIN[modelFamily((a.context_breakdown || {}).model)];
+  return `<div class="grave-card${small ? " kid" : ""}" data-sid="${esc(a.sessionId)}"
+    style="--pet-accent:${accent};--card-tint:${accent}"
+    title="${esc(a.display_name)}\n${esc(a.cwd)}\nborn ${esc(whenAbs(a.startedAt))}\nlast active ${esc(whenAbs(a.last_activity))}">
+    <div class="grave-pet">${mascotSvg(a)}</div>
+    <div class="grave-name">${esc(a.display_name)}</div>
+    <div class="grave-path">${esc(a.cwd)}</div>
+    ${a.git ? `<div class="grave-git">${esc(a.git.repo || a.project)} · ${esc(a.git.branch || "—")}</div>` : ""}
+    <div class="grave-dates">
+      <span>born ${ago(a.startedAt)}</span><span>died ${ago(a.last_activity)}</span>
+    </div>
+    <div class="grave-epitaph" title="Session id — resume with:  claude --resume ${esc(a.sessionId)}">
+      ${esc(String(a.sessionId).slice(0, 8))}${a.tokens ? ` · ${fmtTokens(a.tokens)} tok` : ""}
+      <span class="grave-face">${esc(epitaphFace(a.sessionId))}</span>
     </div>
   </div>`;
 }
@@ -805,11 +1073,11 @@ let lastBodyHtml = "";
 
 const TABS = [
   {id: "overview", label: "Overview", show: () => true},
-  {id: "graph", label: "Work graph", show: a => !!agentGraph(a)},
+  {id: "graph", label: "Work graph", show: a => !a.dead && !!agentGraph(a)},
   {id: "exchange", label: "Exchange",
-   show: a => a.last_prompt || a.last_assistant || a.state === "needs_input"},
-  {id: "mcp", label: "MCP", show: a => (a.mcp || []).length > 0},
-  {id: "artifacts", label: "Artifacts", show: () => true},
+   show: a => a.dead || a.last_prompt || a.last_assistant || a.state === "needs_input"},
+  {id: "mcp", label: "MCP", show: a => !a.dead && (a.mcp || []).length > 0},
+  {id: "artifacts", label: "Artifacts", show: a => !a.dead},
 ];
 
 function tabbarHtml(a) {
@@ -913,8 +1181,9 @@ function detailsSectionHtml(a) {
     ["Path", a.cwd],
     ["Repo", a.git ? `${a.git.repo}${a.git.worktree ? ` (worktree ${a.git.worktree})` : ""}`
                      + ` · ${a.git.branch} @ ${a.git.commit}` : "—"],
-    ["tmux", a.tmux ? a.tmux.target : "not found"],
+    ["tmux", a.tmux ? a.tmux.target : a.remote ? "on another machine" : "not found"],
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
+    ["Context", a.context_tokens ? `${a.context_tokens.toLocaleString()} tokens` : "–"],
     ["Launched by", a.spawned_by || "started on its own"],
     ["Spawned", (a.spawns || []).length ? a.spawns.join(", ") : "–"],
     ["Born", a.startedAt ? `${whenAbs(a.startedAt)} (${ago(a.startedAt)})` : "–"],
@@ -1181,11 +1450,18 @@ function modalHeadHtml(a) {
     <span class="model-tag" style="color:${model.outline}" title="Model — mascot colour">${esc(model.label)}</span>
     <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
     ${a.tmux ? `<span class="tmux-tag" title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>` : ""}
-    <button class="kill-btn" data-sid="${esc(a.sessionId)}" title="Terminate this agent">Kill</button>
+    ${a.dead ? `<span class="grave-tag" title="This session is no longer running">ended ${ago(a.last_activity)}</span>`
+             : `<button class="kill-btn" data-sid="${esc(a.sessionId)}" title="Terminate this agent">Kill</button>`}
     <button class="modal-close" title="Close (Esc)">✕</button>`;
 }
 
 function composerHtml(a) {
+  if (a.remote) {
+    return `<div class="composer"><span class="composer-note">This agent runs on another machine — visible here, but there's no pane to send input to.</span></div>`;
+  }
+  if (a.dead) {
+    return `<div class="composer"><span class="composer-note">This conversation has ended — read-only.</span></div>`;
+  }
   if (!a.tmux) {
     return `<div class="composer"><span class="composer-note">No tmux pane found — can't send input.</span></div>`;
   }
@@ -1200,7 +1476,39 @@ function composerHtml(a) {
 }
 
 function currentAgent() {
-  return agents.find(x => x.sessionId === openSid);
+  return agents.find(x => x.sessionId === openSid)
+      || history.find(x => x.sessionId === openSid);
+}
+
+/* Adapt a past-session row into the shape the card and modal already expect,
+   flagged `dead` so read-only paths can key off one field. */
+function graveAgent(h) {
+  // a rename you gave the session wins over its ai-title
+  const name = h.name || h.title || ("#" + String(h.sessionId || "").slice(0, 8));
+  const git = h.git ? Object.assign({}, h.git, {branch: h.branch || h.git.branch})
+            : (h.branch ? {repo: null, branch: h.branch, commit: ""} : null);
+  return {
+    dead: true, sessionId: h.sessionId, name, display_name: name,
+    cwd: h.cwd || "", git,
+    project: (h.cwd || "").split("/").filter(Boolean).pop() || h.cwd || "",
+    tmux: null, state: "idle", tasks: [], subagents: [], mcp: [],
+    spawns: [], spawned_by: null, prompt: null, pending_tool: null,
+    notification: null, activity: null, current_task: null, agent_status: null,
+    context_breakdown: {model: h.model}, context_tokens: null, context_window: null,
+    startedAt: h.born, last_activity: h.died, transcript_mtime: h.died,
+    permission_mode: null, title: h.title, tokens: h.tokens,
+    context_tokens: h.tokens || null,
+    spawned_by: h.parent_name || null, spawned_by_sid: h.parent || null,
+    last_prompt: null, last_assistant: null, last_exchange: [],
+  };
+}
+
+async function loadHistory() {
+  try {
+    const d = await (await fetch("/api/history", {headers: authHeaders()})).json();
+    history = (d.sessions || []).map(graveAgent);
+    render();
+  } catch { /* the next refresh retries */ }
 }
 
 function startRename() {
@@ -1219,6 +1527,7 @@ function startRename() {
       await post("/api/rename", {sid: a.sessionId, name: inp.value.trim()});
       editingName = false;
       tick();
+      if (a.dead) loadHistory();  // headstones come from their own endpoint
     } else if (e.key === "Escape") {
       editingName = false;
       renderModal();
@@ -1406,7 +1715,7 @@ function renderModal() {
 
 function openModal(sid) {
   openSid = sid;
-  activeTab = "exchange";  // land on the conversation, scrolled to the latest
+  activeTab = "exchange";  // finished conversations only have this one  // land on the conversation, scrolled to the latest
   lastRenderedTab = null;
   chat = {sid: null, messages: null};
   arts = {sid: null, files: [], sources: [], open: [], texts: {}, error: null};
@@ -1433,16 +1742,28 @@ const GROUPS = [
   {id: "idle", label: "Idle", states: ["idle"]},
 ];
 
-function render() {
+const GRAVE_CONTROLS = ["grave-search", "grave-model", "grave-repo",
+                        "grave-min", "grave-max", "grave-sort"];
+
+/* True while any cemetery filter control has focus. The poll must leave the
+   grid alone then: replacing the element would shut an open <select> popup and
+   throw away the caret and selection in a text or number box. */
+function graveFilterFocused() {
+  const el = document.activeElement;
+  return !!(el && el.classList && GRAVE_CONTROLS.some(c => el.classList.contains(c)));
+}
+
+function render(force) {
   const byState = {needs_input: 0, waiting: 0, busy: 0, idle: 0};
   agents.forEach(a => byState[a.state] = (byState[a.state] || 0) + 1);
   counts.innerHTML = Object.entries(byState)
     .filter(([, n]) => n)
     .map(([s, n]) => `<span class="stat ${s}"><span class="dot ${s}"></span><b>${n}</b> ${STATE_LABEL[s]}</span>`)
     .join("");
-  // Don't yank an open picker, or text you're in the middle of selecting.
-  // Everything outside the grid still refreshes.
-  if (!grid.querySelector(".model-menu") && !hasSelectionIn(grid)) {
+  // Don't yank an open picker, text you're in the middle of selecting, or a
+  // cemetery dropdown someone has open. Everything outside the grid refreshes.
+  if (!grid.querySelector(".model-menu") && !hasSelectionIn(grid)
+      && (force || !graveFilterFocused())) {
     const gridHtml = agents.length
       ? GROUPS.map(g => {
           const list = agents.filter(a => g.states.includes(a.state));
@@ -1461,11 +1782,22 @@ function render() {
             </div>` + list.map(cardHtml).join("");
         }).join("")
       : `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`;
+    const shown = graveOpen ? graveSorted(history.filter(graveMatches)) : [];
+    const graveHtml = history.length ? `<div class="group-head grave">
+        <span class="group-label">Past sessions</span>
+        <span class="group-count">${history.length}</span>
+        <span class="group-rule"></span>
+        <button class="grave-toggle">${graveOpen ? "hide" : "show"}</button>
+      </div>` + (graveOpen
+        ? graveFilterHtml(shown.length, history.length)
+          + `<div class="grave-grid">${graveFamilies(shown).map(graveFamilyHtml).join("")
+             || '<div class="empty">Nothing matches that filter.</div>'}</div>` : "")
+      : "";
     // Only rebuild the shelf when it would actually look different; otherwise
     // the page scroll (and any hover) is disturbed once a second for nothing.
-    if (gridHtml !== lastGridHtml) {
-      grid.innerHTML = gridHtml;
-      lastGridHtml = gridHtml;
+    if (gridHtml + graveHtml !== lastGridHtml) {
+      grid.innerHTML = gridHtml + graveHtml;
+      lastGridHtml = gridHtml + graveHtml;
     }
   }
   document.title = agents.some(a => a.state === "needs_input")
@@ -1558,7 +1890,7 @@ async function killAgent(btn) {
         btn.textContent = "Kill";
         btn.classList.remove("armed");
       }
-    }, 3000);
+    }, 8000);  // 3s was faster than most people can move a mouse
     return;
   }
   btn.textContent = "Killing…";
@@ -1642,8 +1974,21 @@ document.body.addEventListener("click", e => {
     renderModal();
     return;
   }
+  if (e.target.closest(".grave-clear")) {
+    e.stopPropagation();
+    graveFilter = {model: "", repo: "", text: "", minTok: "", maxTok: ""};
+    render();
+    return;
+  }
+  if (e.target.closest(".grave-toggle")) {
+    e.stopPropagation();
+    graveOpen = !graveOpen;
+    try { localStorage.tamaGrave = graveOpen ? "1" : "0"; } catch { /* private mode */ }
+    render();
+    return;
+  }
   // A drag that ends on a card is a text selection, not a click on the card.
-  const card = e.target.closest(".card");
+  const card = e.target.closest(".card, .grave-card");
   if (card && !hasSelectionIn(card)) openModal(card.dataset.sid);
 });
 
@@ -1670,6 +2015,32 @@ async function pinArtifact() {
 
 document.body.addEventListener("input", e => {
   if (e.target.closest(".art-add")) loadBrowse(e.target.value);
+  if (e.target.closest(".grave-search")) {
+    graveFilter.text = e.target.value;
+    refreshGraveResults();
+  }
+  if (e.target.closest(".grave-min")) { graveFilter.minTok = e.target.value; refreshGraveResults(); }
+  if (e.target.closest(".grave-max")) { graveFilter.maxTok = e.target.value; refreshGraveResults(); }
+});
+
+/* Hovering the little parent pet lights up the parent's card. */
+document.body.addEventListener("mouseover", e => {
+  const pet = e.target.closest && e.target.closest(".lineage-pet");
+  if (!pet) return;
+  const card = grid.querySelector(`.card[data-sid="${CSS.escape(pet.dataset.parent)}"]`);
+  if (card) card.classList.add("kin-highlight");
+});
+
+document.body.addEventListener("mouseout", e => {
+  if (e.target.closest && e.target.closest(".lineage-pet")) {
+    grid.querySelectorAll(".kin-highlight").forEach(c => c.classList.remove("kin-highlight"));
+  }
+});
+
+document.body.addEventListener("change", e => {
+  if (e.target.closest(".grave-model")) { graveFilter.model = e.target.value; refreshGraveResults(); }
+  if (e.target.closest(".grave-repo")) { graveFilter.repo = e.target.value; refreshGraveResults(); }
+  if (e.target.closest(".grave-sort")) { graveSort = e.target.value; refreshGraveResults(); }
 });
 
 document.addEventListener("keydown", e => {
@@ -1776,5 +2147,10 @@ async function tick() {
   }
 }
 
+/* 600ms rather than a second: the poll interval and the server's cache are the
+   entire lag between an agent changing state and the card saying so, and at 1s
+   that was up to 1.5s. */
 tick();
-setInterval(tick, 1000);
+setInterval(tick, 600);
+loadHistory();
+setInterval(loadHistory, 60000);  // past sessions change slowly

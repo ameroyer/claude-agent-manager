@@ -48,4 +48,4 @@ bypass-selection = true
 # Leading "/" anchors each pattern to the repo root. Unanchored, "web" and
 # "hooks" also match .claude/worktrees/*/web, which swept an entire unrelated
 # worktree into the sdist.
-include = ["/server.py", "/web", "/hooks", "/README.md", "/LICENSE", "/pyproject.toml"]
+include = ["/server.py", "/web", "/hooks", "/docs", "/README.md", "/LICENSE", "/pyproject.toml"]

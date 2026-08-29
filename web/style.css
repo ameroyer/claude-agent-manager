@@ -801,24 +801,26 @@ main {
    Pet colour = model · kit/buttons = repo accent · face = live state.
    =================================================================== */
 
-.legend-wrap { display: flex; align-items: center; }
-.legend { display: flex; gap: 10px; flex-wrap: wrap; }
-.legend-item { display: inline-flex; align-items: center; gap: 5px;
-  font: 600 10.5px var(--mono); color: var(--shell-ink-dim); }
-.legend-dot { width: 9px; height: 9px; border-radius: 2px;
-  box-shadow: 0 0 0 1.5px var(--shell-edge); }
+.legend-wrap { display: flex; align-items: center; min-width: 0; }
+/* Always one row: wrapping pushed the header around. */
+.legend { display: flex; gap: 7px; flex-wrap: nowrap; white-space: nowrap; }
+.legend-item { display: inline-flex; align-items: center; gap: 2px;
+  font: 600 9px var(--mono); color: var(--shell-ink-dim); }
+.mascot.legend-pet { width: 22px; height: auto; flex-shrink: 0; display: inline-block; }
 
 /* ---- shell ---- */
 .card.tama {
   --pet-accent: #f4c95d;
-  --model-tint: var(--shell);
+  --card-tint: var(--shell);
   padding: 12px 12px 10px;
   border-radius: 18px;
   /* the shell wears a muted wash of the pet's model colour, so a glance across
      the shelf reads which model is where — kept low so the LCD, the mood pill
      and the state border stay the loudest things on the card */
-  background: color-mix(in srgb, var(--model-tint) 14%, var(--shell));
-  border: 2px solid color-mix(in srgb, var(--model-tint) 30%, var(--shell-edge));
+  /* 35% is as far as this can go: past it the shell text drops below AA in
+     dark mode (4.65 at 35%, 3.61 at 45%). */
+  background: color-mix(in srgb, var(--card-tint) 35%, var(--shell));
+  border: 2px solid color-mix(in srgb, var(--card-tint) 55%, var(--shell-edge));
   box-shadow: 5px 5px 0 color-mix(in srgb, var(--ink) 22%, transparent);
   /* The card slides on hover. It used to step in two discrete frames and grow
      its shadow at the same time, which read as a bump rather than a shift. */
@@ -829,7 +831,7 @@ main {
 .card.tama.needs_input { border-color: var(--critical);
   box-shadow: 5px 5px 0 color-mix(in srgb, var(--critical) 45%, transparent); }
 .card.tama.idle { opacity: .88; }
-.card.tama.child { background: color-mix(in srgb, var(--model-tint) 7%, var(--shell)); }
+.card.tama.child { background: color-mix(in srgb, var(--card-tint) 18%, var(--shell)); }
 
 /* ---- LCD ---- */
 .tama-screen {
@@ -926,11 +928,13 @@ button.model-tag:hover { background: var(--lcd); }
 }
 .tama-mid { display: flex; align-items: flex-end; gap: 10px; margin: 6px 0 2px; }
 .tama-stats { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding-bottom: 6px; }
-.stat-big { display: flex; align-items: baseline; gap: 4px; color: var(--lcd-ink); }
-.stat-big .stat-num { font: 800 30px/1 var(--mono); letter-spacing: -0.02em;
+/* the two figures read as a pair: same size number, small label under each */
+.stat-big { display: flex; align-items: flex-start; gap: 12px; color: var(--lcd-ink); }
+.stat-pair { display: flex; flex-direction: column; align-items: flex-start; line-height: 1; }
+.stat-big .stat-num { font: 800 19px/1 var(--mono); letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums; }
-.stat-big .stat-unit { font: 700 10px var(--mono); text-transform: uppercase;
-  letter-spacing: .08em; color: var(--lcd-dim); }
+.stat-big .stat-unit { font: 700 8px var(--mono); text-transform: uppercase;
+  letter-spacing: .1em; color: var(--lcd-dim); margin-top: 2px; }
 .stat-big.warn .stat-num { color: #9c6f00; }
 .stat-big.critical .stat-num { color: #cf3560; }
 .stat-sub { font: 600 10.5px var(--mono); color: var(--lcd-dim);
@@ -972,6 +976,16 @@ button.model-tag:hover { background: var(--lcd); }
 }
 .card.child .tama-shell, .card.child .tama-screen { filter: saturate(.8); }
 .lineage { font-style: italic; }
+.lineage-pet { display: inline-flex; vertical-align: middle; margin: 0 3px;
+  cursor: help; border-radius: 3px; transition: background .12s ease; }
+.lineage-pet:hover { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.mascot.lineage-mascot { width: 14px; height: auto; }
+/* the parent's card, lit up while you hover its pet on a child */
+.card.kin-highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent),
+              5px 5px 0 color-mix(in srgb, var(--ink) 22%, transparent);
+}
 
 /* sub-agents: spawned inside a session, shown on its own card */
 .subagents { display: flex; align-items: center; gap: 5px; margin-top: 7px; flex-wrap: wrap; }
@@ -1025,21 +1039,19 @@ button.model-tag:hover { background: var(--lcd); }
 .tama-screen .key-btn.alt { background: var(--lcd-hi); color: var(--lcd-ink); }
 .tama-screen .key-btn.no { background: #ff6188; color: #3c0517; }
 
-/* ---- the three device lights: status · context · repo family ---- */
-.tama-buttons { display: flex; justify-content: center; gap: 22px; margin: 9px 0 8px; }
+/* ---- the device lamps: a context gauge ---- */
+.tama-buttons { display: flex; justify-content: center; gap: 9px; margin: 9px 0 8px; }
 .tama-buttons .led {
   width: 13px; height: 13px; border-radius: 50%;
   background: var(--surface-3);
   border: 2px solid var(--shell-edge);
   box-shadow: inset 0 -2px 0 rgba(0,0,0,.28);
 }
-.led.st-busy, .led.ctx-ok { background: #a9dc76; }
-.led.st-waiting, .led.ctx-warn { background: #ffd866; }
-.led.st-needs_input, .led.ctx-critical { background: #ff6188; }
-.led.st-idle { background: #79767c; }
-.led.st-needs_input { animation: btn-blink 1s steps(2) infinite; }
-.led-repo { background: var(--pet-accent); }
-@keyframes btn-blink { 50% { opacity: .3; } }
+.led.off { opacity: .45; }
+.led.lit.ok { background: #a9dc76; }
+.led.lit.warn { background: #ffd866; }
+.led.lit.critical { background: #ff6188; animation: btn-blink 1.1s steps(2) infinite; }
+@keyframes btn-blink { 50% { opacity: .35; } }
 
 /* ---- engraved meta on the shell ---- */
 .shell-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -1098,7 +1110,10 @@ button.model-tag:hover { background: var(--lcd); }
 .art-pin-btn {
   font: 650 12px var(--sans); color: var(--accent-ink); background: var(--accent);
   border: none; border-radius: var(--r-inset); padding: 6px 14px; cursor: pointer;
+  transition: filter .12s ease;
 }
+.art-pin-btn:hover { filter: brightness(1.08); }
+.art-pin-btn:active { filter: brightness(0.94); }
 .art-body .md { color: var(--ink-2); font-size: 13px; }
 .art-sources { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 12px; font: 11px var(--mono); }
@@ -1150,3 +1165,105 @@ button.model-tag:hover { background: var(--lcd); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mcp-state { margin-left: auto; font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
 .mcp-row.connected .mcp-state { color: var(--good); }
+
+/* ---------- past sessions: headstones, not handhelds ---------- */
+.group-head.grave .group-label { color: var(--muted); }
+.grave-toggle {
+  font: 650 10px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); background: none; border: 1px solid var(--border);
+  border-radius: 6px; padding: 2px 9px; cursor: pointer;
+}
+.grave-toggle:hover { color: var(--ink); border-color: var(--ink-2); }
+.grave-filter {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 2px 0 4px;
+}
+.grave-search, .grave-model, .grave-repo, .grave-sort {
+  font: 11.5px var(--mono); color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-inset); padding: 5px 9px; outline: none;
+}
+.grave-search { flex: 1; min-width: 190px; }
+.grave-search:focus { border-color: var(--accent); }
+.grave-model, .grave-repo, .grave-sort { max-width: 200px; cursor: pointer; }
+.grave-tok {
+  display: inline-flex; align-items: center; gap: 3px;
+  font: 11px var(--mono); color: var(--muted); white-space: nowrap;
+}
+.grave-min, .grave-max {
+  width: 58px; font: 11.5px var(--mono); color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-inset); padding: 5px 6px; outline: none;
+}
+.grave-min:focus, .grave-max:focus { border-color: var(--accent); }
+.grave-count { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+.grave-clear {
+  font: 650 10.5px var(--mono); color: var(--muted);
+  background: none; border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 9px; cursor: pointer;
+}
+.grave-clear:hover { color: var(--ink); border-color: var(--ink-2); }
+
+.grave-grid {
+  grid-column: 1 / -1;
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+}
+/* a family plot: the launcher, with what it launched alongside at half size */
+.grave-family {
+  grid-column: span 2;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start;
+  padding: 7px; border-radius: 14px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  border: 1px dashed var(--border);
+}
+.grave-kids { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; align-content: start; }
+.grave-card.kid { padding: 6px 5px 5px; border-radius: 9px; gap: 1px; }
+.grave-card.kid .grave-pet { width: 26px; }
+.grave-card.kid .grave-name { font-size: 9.5px; }
+.grave-card.kid .grave-path, .grave-card.kid .grave-git,
+.grave-card.kid .grave-dates { font-size: 8px; }
+.grave-card.kid .grave-epitaph { font-size: 8px; padding-top: 3px; margin-top: 3px; }
+
+.grave-card {
+  --pet-accent: #f4c95d;
+  --card-tint: var(--shell);
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 11px 9px 9px; min-width: 0; cursor: pointer;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card-tint) 8%, var(--surface-2));
+  border: 1px solid var(--border);
+  transition: transform .16s ease;
+}
+.grave-card:hover { transform: translate(-2px,-2px); border-color: var(--ink-2); }
+.grave-pet { width: 44px; opacity: .72; }
+.grave-pet .mascot { width: 100%; height: auto; }  /* .grave-pet wrapper sets the real size */
+.grave-card > div { max-width: 100%; }
+.grave-name {
+  font: 650 11.5px var(--sans); color: var(--ink); text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%;
+}
+.grave-path, .grave-git {
+  font: 9.5px var(--mono); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  width: 100%; text-align: center; direction: rtl;
+}
+.grave-git { direction: ltr; color: var(--ink-2); }
+.grave-dates {
+  display: flex; gap: 7px; margin-top: 2px;
+  font: 9px var(--mono); color: var(--muted); white-space: nowrap;
+}
+.grave-epitaph {
+  margin-top: 4px; padding-top: 4px; width: 100%;
+  border-top: 1px dashed var(--border);
+  font: italic 9.5px var(--mono); color: var(--muted);
+  text-align: center; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.grave-face { font-style: normal; color: var(--ink-2); margin-left: 3px; }
+
+.grave-tag {
+  font: 600 11px var(--mono); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 7px; padding: 3px 9px;
+}

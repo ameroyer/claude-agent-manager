@@ -54,6 +54,10 @@ EXCHANGE_PREVIEW_CHARS = 2000
 # Upper bound on a request body. Every endpoint takes a small JSON object; the
 # largest realistic payload is a typed message.
 MAX_BODY_BYTES = 1024 * 1024
+# How long a built board stays servable. Kept below the client's poll interval:
+# together they are the whole of the lag between an agent changing state and the
+# card showing it, and this half was contributing 0.5s of it.
+STATE_CACHE_TTL = 0.25
 
 
 def run(cmd):
@@ -478,6 +482,134 @@ def mcp_servers(cwd, session_id):
     return out
 
 
+HISTORY_MAX = 200
+HISTORY_TTL = 30
+# Read the head by LINES, not bytes: a single record can be enormous (a 205 KB
+# queue-operation was the first line of one real transcript), and a fixed byte
+# window then contains one truncated, unparseable line and finds nothing — which
+# silently dropped substantial sessions from the list. The byte ceiling stops a
+# pathological file from being read whole.
+HISTORY_HEAD_LINES = 40
+HISTORY_HEAD_BYTES = 2 * 1024 * 1024
+# Tail windows to try in turn; the last record can be huge too.
+HISTORY_TAIL_STEPS = (64 * 1024, 512 * 1024, 4 * 1024 * 1024)
+_history_cache = {"t": 0.0, "rows": []}
+_history_row_cache = {}
+
+
+def history_row(path, session_id):
+    """Summarise one past conversation from a bounded head + tail read.
+
+    The head carries everything but the end: cwd, branch, birth timestamp, the
+    ai-title and the model. Only the death time needs the tail."""
+    try:
+        mtime, size = os.path.getmtime(path), os.path.getsize(path)
+    except OSError:
+        return None
+    hit = _history_row_cache.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    row = {"sessionId": session_id, "cwd": "", "title": None, "model": None,
+           "branch": None, "born": None, "died": None, "tokens": None}
+    try:
+        with open(path, "rb") as f:
+            read = 0
+            for i, raw in enumerate(f):
+                read += len(raw)
+                if i >= HISTORY_HEAD_LINES or read > HISTORY_HEAD_BYTES:
+                    break
+                try:
+                    rec = json.loads(raw)
+                except Exception:
+                    continue
+                row["cwd"] = row["cwd"] or rec.get("cwd") or ""
+                row["branch"] = row["branch"] or rec.get("gitBranch")
+                if row["born"] is None and rec.get("timestamp"):
+                    row["born"] = iso_to_epoch(rec["timestamp"])
+                if not row["title"] and rec.get("type") == "ai-title":
+                    row["title"] = rec.get("aiTitle") or rec.get("title")
+                if not row["model"] and rec.get("type") == "assistant":
+                    row["model"] = (rec.get("message") or {}).get("model")
+                if row["cwd"] and row["born"] and row["title"] and row["model"]:
+                    break
+            for window in HISTORY_TAIL_STEPS:
+                f.seek(max(0, size - window))
+                lines = f.read().decode("utf-8", "replace").splitlines()
+                if window < size:
+                    lines = lines[1:]  # drop the partial first line
+                for line in reversed(lines):
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if row["died"] is None and rec.get("timestamp"):
+                        row["died"] = iso_to_epoch(rec["timestamp"])
+                    if row["tokens"] is None:
+                        # how big the conversation had grown by the end
+                        usage = (rec.get("message") or {}).get("usage") or {}
+                        if usage:
+                            row["tokens"] = sum(usage.get(k, 0) for k in (
+                                "input_tokens", "cache_read_input_tokens",
+                                "cache_creation_input_tokens", "output_tokens"))
+                    if row["died"] and row["tokens"]:
+                        break
+                if (row["died"] and row["tokens"]) or window >= size:
+                    break
+    except OSError:
+        return None
+    _history_row_cache[path] = (mtime, row)
+    return row
+
+
+def list_history(limit=HISTORY_MAX):
+    """Past conversations that are not currently live, newest death first.
+
+    Deliberately not part of /api/state: the board polls that every second and
+    this walks every project directory, so it lives behind its own endpoint and
+    its own TTL."""
+    now = time.time()
+    if now - _history_cache["t"] < HISTORY_TTL:
+        return _history_cache["rows"]
+    live = {a["sessionId"] for a in cached_state()["agents"]}
+    renames = load_names()  # not `names`: the loop below uses that for listdir
+    lineage = load_spawn_log()["lineage"]
+    files = []
+    try:
+        projects = os.listdir(PROJECTS_DIR)
+    except OSError:
+        return []
+    for project in projects:
+        d = os.path.join(PROJECTS_DIR, project)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            sid = name[:-len(".jsonl")]
+            if sid in live:
+                continue
+            full = os.path.join(d, name)
+            try:
+                files.append((os.path.getmtime(full), full, sid))
+            except OSError:
+                continue
+    files.sort(reverse=True)
+    rows = []
+    for _, full, sid in files[:limit]:
+        row = history_row(full, sid)
+        if row and row["died"] and row["cwd"]:
+            row["git"] = git_info(row["cwd"])
+            row["name"] = renames.get(sid)  # a rename outlives the session
+            row["parent"] = lineage.get(sid, {}).get("parent")
+            row["parent_name"] = lineage.get(sid, {}).get("name")
+            rows.append(row)
+    rows.sort(key=lambda r: -(r["died"] or 0))
+    _history_cache.update(t=now, rows=rows)
+    return rows
+
+
 def load_agent_status(session_id):
     """Agent-maintained status file: {"summary": str, "graph": {nodes, edges}}."""
     path = os.path.join(STATUS_DIR, f"{session_id}.json")
@@ -755,7 +887,12 @@ def proc_foreground(pid):
     return fields[2] == fields[5]  # pgrp == tpgid
 
 
-_ACTIVITY_RE = re.compile(r"([A-Z][a-zA-Z]+…\s*\([^)]*\))")
+# The spinner line while a turn runs: "✻ Razzle-dazzling… (3m 11s)". The word
+# can be hyphenated — the old [a-zA-Z]+ missed exactly those, so a working agent
+# read as idle. The elapsed-seconds parenthetical is what separates a live
+# spinner from a finished "✻ Crunched for 5s" or from prose ending in "…".
+_ACTIVITY_RE = re.compile(r"([A-Z][A-Za-z-]*…\s*\([^)]*\d+\s*s[^)]*\))")
+ACTIVITY_SCAN_LINES = 16
 _OPTION_RE = re.compile(r"^(?P<lead>[\s│>❯]*)(?P<key>\d)\.\s+(?P<label>.+?)\s*$")
 # Every blocking dialog Claude Code draws ends with this hint line.
 _DIALOG_HINT_RE = re.compile(r"esc to cancel", re.I)
@@ -884,7 +1021,33 @@ def roster_subagents(lines):
     return out[:MAX_SUBAGENTS]
 
 
-def pane_status(target):
+PANE_MARK = "@@tamaclaudchi-pane@@"
+
+
+def capture_panes(targets):
+    """Capture several panes in one tmux call → {target: text}.
+
+    Each pane was its own subprocess, and those round-trips dominated a board
+    build (profiling showed most of it waiting on select.poll). tmux chains
+    commands with ";", so one invocation with a marker printed between panes
+    replaces N invocations. Falls back to one-at-a-time if the output doesn't
+    split into the expected number of pieces — a pane whose own text contains
+    the marker, or a target tmux rejects mid-chain."""
+    targets = list(targets)
+    if not targets:
+        return {}
+    args = ["tmux"]
+    for t in targets:
+        args += ["capture-pane", "-p", "-t", t, "-S", "-20", ";",
+                 "display-message", "-p", PANE_MARK, ";"]
+    chunks = run(args[:-1]).split(PANE_MARK + "\n")
+    if len(chunks) < len(targets):
+        return {t: run(["tmux", "capture-pane", "-p", "-t", t, "-S", "-20"])
+                for t in targets}
+    return {t: chunks[i] for i, t in enumerate(targets)}
+
+
+def pane_status(target, out=None):
     """One pane capture → the live permission mode and the activity line.
 
     Mode comes from the bottom status footer ('⏵⏵ auto mode on · …'). Activity
@@ -893,19 +1056,23 @@ def pane_status(target):
               "subagents": []}
     if not target:
         return result
-    out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-20"])
+    if out is None:
+        out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-20"])
     lines = [ln for ln in out.splitlines() if ln.strip()]
     if not lines:
         return result
     result["working"] = False
     result["mode"] = footer_mode(lines)
-    for ln in lines:
+    for ln in lines[-ACTIVITY_SCAN_LINES:]:
         m = _ACTIVITY_RE.search(ln)
         if m:
             result["activity"] = m.group(1)
             break
-    # "esc to interrupt" or a spinner line means the agent is actively working.
-    result["working"] = bool(result["activity"]) or "esc to interrupt" in out.lower()
+    # A spinner line, or the footer offering to interrupt. Both are read from the
+    # bottom of the pane only: searching the whole capture let the agent's own
+    # echoed shell text ("esc to interrupt" in a grep) masquerade as the footer.
+    footer = "\n".join(lines[-FOOTER_SCAN_LINES:]).lower()
+    result["working"] = bool(result["activity"]) or "esc to interrupt" in footer
     result["prompt"] = detect_prompt(lines)
     result["subagents"] = roster_subagents(lines)
     return result
@@ -931,6 +1098,43 @@ def newest_session_id(cwd, since=0):
     except OSError:
         return None
     return best[1][:-len(".jsonl")] if best else None
+
+
+REMOTE_FRESH_SECONDS = 300
+
+
+def discover_remote_regs(seen_sids):
+    """Sessions whose process isn't on this machine at all.
+
+    A Claude started inside a Slurm allocation (`srun`), or on any other host
+    that shares ~/.claude over NFS, writes its registry entry and transcript
+    here — but its pid and its tmux pane live on the compute node, so /proc and
+    tmux on this host cannot see either. The normal discovery path drops those
+    silently. Surface them instead, read-only: there is no pane to send keys to,
+    but you can still see the conversation and that the agent is alive."""
+    out = []
+    if not os.path.isdir(SESSIONS_DIR):
+        return out
+    for name in sorted(os.listdir(SESSIONS_DIR)):
+        if not name.endswith(".json"):
+            continue
+        reg = read_json(os.path.join(SESSIONS_DIR, name))
+        sid = (reg or {}).get("sessionId")
+        if not reg or not sid or sid in seen_sids:
+            continue
+        if pid_alive(reg.get("pid", -1)):
+            continue  # local: the normal path already judged it
+        try:
+            recent = (time.time()
+                      - os.path.getmtime(transcript_path(reg.get("cwd", ""), sid))
+                      < REMOTE_FRESH_SECONDS)
+        except OSError:
+            recent = False
+        if not recent:
+            continue  # a stale entry from a session that has since ended
+        seen_sids.add(sid)
+        out.append(dict(reg, remote=True))
+    return out
 
 
 def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
@@ -1047,10 +1251,11 @@ def set_name(session_id, name):
     except Exception as e:
         return False, str(e)
     _cache["t"] = 0.0  # reflect the new name on the next poll
+    _history_cache["t"] = 0.0  # ... including on a headstone
     return True, name or "cleared"
 
 
-def build_agent(reg, pid_to_pane, names=None):
+def build_agent(reg, pid_to_pane, names=None, captures=None):
     sid = reg.get("sessionId", "")
     cwd = reg.get("cwd", "")
     pane = pid_to_pane.get(reg["pid"])
@@ -1066,7 +1271,7 @@ def build_agent(reg, pid_to_pane, names=None):
         {"role": "assistant", "text": tinfo["last_assistant"],
          "ts": tinfo["last_assistant_ts"]}) if m["text"]]
     last_exchange.sort(key=lambda m: iso_to_epoch(m["ts"]) or 0)  # chat order
-    pstatus = pane_status(pane["target"]) if pane else {
+    pstatus = pane_status(pane["target"], (captures or {}).get(pane["target"])) if pane else {
         "mode": None, "activity": None, "working": None, "prompt": None,
         "subagents": []}
     # When the conversation last actually moved. Falls back to the file mtime
@@ -1109,6 +1314,7 @@ def build_agent(reg, pid_to_pane, names=None):
         "statusUpdatedAt": reg.get("statusUpdatedAt"),
         "startedAt": reg.get("startedAt"),
         "tmux": pane,
+        "remote": bool(reg.get("remote")),
         "tasks": tasks,
         "current_task": in_progress[0]["activeForm"] if in_progress else None,
         "notification": notif_msg,
@@ -1146,32 +1352,68 @@ def link_spawns(agents):
         if a["tmux"]:
             by_session.setdefault(a["tmux"]["session"], a)
     for a in agents:
-        a["spawns"], a["spawned_by"] = [], None
+        a["spawns"], a["spawned_by"], a["spawned_by_sid"] = [], None, None
     for a in agents:
         for name in a.pop("_spawned", []):
             child = by_session.get(name)
             if child is not None and child is not a and not child["spawned_by"]:
                 child["spawned_by"] = a["display_name"] or a["name"]
+                child["spawned_by_sid"] = a["sessionId"]  # lets the card link to it
                 a["spawns"].append(child["display_name"] or child["name"])
-    dashboard = read_json(SPAWNS_FILE) or {}
+                record_lineage(child["sessionId"], a["sessionId"],
+                               a["display_name"] or a["name"])
+    log = load_spawn_log()
     for a in agents:
-        if not a["spawned_by"] and a["tmux"] and a["tmux"]["session"] in dashboard:
+        if not a["spawned_by"] and a["tmux"] and a["tmux"]["session"] in log["tmux"]:
             a["spawned_by"] = "dashboard"
     return agents
 
 
-def record_spawn(session_name):
-    """Remember that the dashboard created this tmux session, so its card can
-    say so. Pruned to sessions that still exist on every write."""
-    live = set(run(["tmux", "list-sessions", "-F", "#{session_name}"]).split())
-    cfg = {k: v for k, v in (read_json(SPAWNS_FILE) or {}).items() if k in live}
-    cfg[session_name] = "dashboard"
+def load_spawn_log():
+    """{"tmux": {session name: origin}, "lineage": {child sid: {...}}}.
+
+    Tolerates the older flat shape, which was only the tmux map."""
+    cfg = read_json(SPAWNS_FILE) or {}
+    if "tmux" in cfg or "lineage" in cfg:
+        cfg.setdefault("tmux", {})
+        cfg.setdefault("lineage", {})
+        return cfg
+    return {"tmux": cfg, "lineage": {}}
+
+
+def save_spawn_log(cfg):
     try:
         with open(SPAWNS_FILE + ".tmp", "w") as f:
             json.dump(cfg, f)
         os.replace(SPAWNS_FILE + ".tmp", SPAWNS_FILE)  # atomic — no torn writes
     except OSError:
         pass
+
+
+def record_lineage(child_sid, parent_sid, parent_name):
+    """Remember who launched whom while both are still live.
+
+    tmux daemonises, so this can only be observed in the moment: once both
+    sessions have ended there is nothing left on disk that connects them. This
+    is what lets the cemetery group a family together."""
+    cfg = load_spawn_log()
+    known = cfg["lineage"].get(child_sid)
+    if known and known.get("parent") == parent_sid and known.get("name") == parent_name:
+        return
+    cfg["lineage"][child_sid] = {"parent": parent_sid, "name": parent_name}
+    if len(cfg["lineage"]) > 500:  # keep the file bounded
+        cfg["lineage"] = dict(list(cfg["lineage"].items())[-500:])
+    save_spawn_log(cfg)
+
+
+def record_spawn(session_name):
+    """Remember that the dashboard created this tmux session, so its card can
+    say so. Pruned to sessions that still exist on every write."""
+    live = set(run(["tmux", "list-sessions", "-F", "#{session_name}"]).split())
+    cfg = load_spawn_log()
+    cfg["tmux"] = {k: v for k, v in cfg["tmux"].items() if k in live}
+    cfg["tmux"][session_name] = "dashboard"
+    save_spawn_log(cfg)
 
 
 def build_state():
@@ -1195,18 +1437,22 @@ def build_state():
             if reg["pid"] in pid_to_pane and proc_foreground(reg["pid"]):
                 regs.append(reg)
     regs.extend(discover_live_regs(pid_to_pane, seen_pids, seen_sids))
+    regs.extend(discover_remote_regs(seen_sids))
     names = load_names()
-    agents = link_spawns([build_agent(reg, pid_to_pane, names) for reg in regs])
+    # one tmux call for every pane, instead of one per agent
+    captures = capture_panes({pid_to_pane[r["pid"]]["target"]
+                              for r in regs if r["pid"] in pid_to_pane})
+    agents = link_spawns([build_agent(reg, pid_to_pane, names, captures)
+                          for reg in regs])
     # Stable identity sort; the frontend groups by attention state.
     agents.sort(key=lambda a: (a["project"] or "", a["name"] or ""))
-    # These caches are keyed by session / cwd and would otherwise keep an entry
-    # for every agent ever seen, for the life of the process.
-    live_sids = {a["sessionId"] for a in agents}
-    live_cwds = {a["cwd"] for a in agents}
-    for cache, live in ((_tail_cache, live_sids), (_chat_cache, live_sids),
-                        (_mcp_state_cache, live_sids), (_git_cache, live_cwds)):
-        for key in [k for k in cache if k not in live]:
-            cache.pop(key, None)
+    # Bound the caches by size rather than by which sessions are live: past
+    # conversations use the same caches, and evicting them every second made
+    # opening one re-read its transcript on every poll.
+    for cache, cap in ((_tail_cache, 200), (_chat_cache, 60), (_mcp_state_cache, 200),
+                       (_git_cache, 200), (_history_row_cache, 500)):
+        if len(cache) > cap:
+            cache.clear()
     spawn_dir = os.path.join(HOME, "projects")
     if not os.path.isdir(spawn_dir):
         spawn_dir = HOME
@@ -1255,7 +1501,7 @@ _cache_lock = threading.Lock()
 
 def cached_state():
     with _cache_lock:
-        if time.time() - _cache["t"] > 0.5:
+        if time.time() - _cache["t"] > STATE_CACHE_TTL:
             _cache["state"] = build_state()
             _cache["t"] = time.time()
         return _cache["state"]
@@ -1561,6 +1807,9 @@ class Handler(BaseHTTPRequestHandler):
                                  "path": path if text is not None else "",
                                  "text": text or "", "error": err})
                 return
+            if route == "/api/history":
+                self._send(200, {"sessions": list_history()})
+                return
             if route == "/api/browse":
                 q = parse_qs(urlparse(self.path).query)
                 self._send(200, {"paths": browse_paths(q.get("path", [""])[0])})
@@ -1576,8 +1825,10 @@ class Handler(BaseHTTPRequestHandler):
                 sid = parse_qs(urlparse(self.path).query).get("sid", [""])[0]
                 agent = next((a for a in cached_state()["agents"]
                               if a["sessionId"] == sid), None)
-                self._send(*( (404, {"error": "unknown session"}) if not agent
-                             else (200, {"messages": load_chat(agent["cwd"], sid)}) ))
+                cwd = agent["cwd"] if agent else next(
+                    (r["cwd"] for r in list_history() if r["sessionId"] == sid), None)
+                self._send(*( (404, {"error": "unknown session"}) if cwd is None
+                             else (200, {"messages": load_chat(cwd, sid)}) ))
                 return
             self._send(404, {"error": "not found"})
             return
