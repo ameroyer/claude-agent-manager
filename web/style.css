@@ -667,6 +667,29 @@ main {
 .chat { display: flex; flex-direction: column; gap: 12px; }
 .chat-loading { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
 .chat-gap { align-self: center; color: var(--muted); font: 11px var(--mono); padding: 2px 0; opacity: 0.85; }
+
+/* The agent is mid-turn: a pet strolling along a line at the foot of the
+   conversation, its status walking behind it. Streaming prose and compaction
+   both leave the transcript untouched for minutes at a time, so without this
+   an agent hard at work looked like one that had gone quiet. */
+.work-strip { align-self: stretch; padding-top: 6px; }
+.work-track {
+  position: relative; height: 30px; overflow: hidden;
+  border-bottom: 2px dotted color-mix(in srgb, var(--muted) 50%, transparent);
+}
+.work-walker {
+  position: absolute; bottom: 0; left: 0;
+  display: flex; align-items: flex-end; gap: 7px;
+  animation: pet-stroll 11s linear infinite;  /* WALK_SECONDS in app.js */
+}
+@keyframes pet-stroll { from { left: -18%; } to { left: 100%; } }
+/* .mascot sets width: 84px at equal specificity and later in the file, so this
+   needs both classes to win — the same trap the legend pets hit. */
+.mascot.work-pet { width: 26px; }
+.work-label {
+  font: 700 9.5px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); white-space: nowrap; padding-bottom: 5px;
+}
 .msg { max-width: 82%; min-width: 0; }
 .msg.user { align-self: flex-end; }
 .msg.assistant { align-self: flex-start; }
@@ -828,6 +851,16 @@ main {
 }
 .card.tama:hover { transform: translate(-2px,-2px); }
 .card.tama:active { transform: translate(1px,1px); }
+/* Sliding on hover moves the card out from under a cursor resting near its
+   bottom or right edge: hover is lost, the card slides back, hover is regained,
+   and it oscillates — which is the other half of what "bumping" looked like.
+   This pad extends the hover region 3px past the card so the 2px shift can
+   never uncover the pointer. It sits behind the content (negative z-index), so
+   it only ever catches the overhang and never swallows a click on a child, and
+   3px stays under half the tightest grid gap (6px) so two pads never overlap. */
+.card.tama::before, .grave-card::before {
+  content: ""; position: absolute; inset: -3px; z-index: -1; border-radius: inherit;
+}
 .card.tama.needs_input { border-color: var(--critical);
   box-shadow: 5px 5px 0 color-mix(in srgb, var(--critical) 45%, transparent); }
 .card.tama.idle { opacity: .88; }
@@ -947,11 +980,12 @@ button.model-tag:hover { background: var(--lcd); }
 .mascot { width: 84px; height: auto; display: block; }
 .pet-ground { width: 62px; height: 3px; margin-top: 2px; border-radius: 2px;
   background: color-mix(in srgb, var(--lcd-ink) 30%, transparent); }
-.mascot.busy { animation: pet-bob 1.4s steps(2) infinite; }
-.mascot.waiting { animation: pet-bob 2.8s steps(2) infinite; }
-.mascot.needs_input { animation: pet-alert .55s steps(2) infinite; }
-@keyframes pet-bob   { 50% { transform: translateY(-3px); } }
-@keyframes pet-alert { 50% { transform: translateX(3px); } }
+/* The pet does not move, at all. It used to bob and jitter on a steps(2)
+   timeline — a hard 3px jump with nothing in between, which is a bump by
+   construction — and pausing that on hover only converted it into a snap the
+   instant the cursor arrived. State is already carried by the mood pill, the
+   badge, the border colour and the context gauge, none of which twitch.
+   Hovering a card is now exactly one thing: the card slides 2px. */
 
 /* the "current mood" pill, straight from the reference */
 .mood-pill {
@@ -974,7 +1008,17 @@ button.model-tag:hover { background: var(--lcd); }
   box-shadow: none;
   border-style: dashed;
 }
-.card.child .tama-shell, .card.child .tama-screen { filter: saturate(.8); }
+.card.child .tama-screen { filter: saturate(.8); }
+
+/* Every chrome button acknowledges its own press. Without it, a click whose
+   effect takes a round trip through tmux reads as though nothing happened —
+   which is most of what "the UI feels finnicky" was. Card-internal buttons are
+   left out on purpose: the card's own :active already answers for them, and
+   both firing would shift the button twice as far as the card. */
+.modal-close:active, .kill-btn:active, .tab:active, .mode-btn:active,
+.rename-btn:active, .model-tag:active, .grave-toggle:active,
+.grave-clear:active, .art-head:active, .art-unpin:active, .art-pin-btn:active,
+.copy-btn:active { transform: translateY(1px); }
 .lineage { font-style: italic; }
 .lineage-pet { display: inline-flex; vertical-align: middle; margin: 0 3px;
   cursor: help; border-radius: 3px; transition: background .12s ease; }
@@ -1033,7 +1077,9 @@ button.model-tag:hover { background: var(--lcd); }
   box-shadow: 2px 2px 0 var(--shell-edge);
   transition: transform .16s ease;
 }
-.tama-screen .key-btn:hover { transform: translate(-1px,-1px); }
+/* Brightness rather than a shift: these keys are small enough that sliding them
+   under the cursor flickered their own hover on and off. */
+.tama-screen .key-btn:hover { filter: brightness(1.08); }
 .tama-screen .key-btn:active, .tama-screen .key-btn.sent { transform: translate(1px,1px); }
 .tama-screen .key-btn.ok { background: #a9dc76; color: #223012; }
 .tama-screen .key-btn.alt { background: var(--lcd-hi); color: var(--lcd-ink); }
@@ -1050,8 +1096,9 @@ button.model-tag:hover { background: var(--lcd); }
 .led.off { opacity: .45; }
 .led.lit.ok { background: #a9dc76; }
 .led.lit.warn { background: #ffd866; }
-.led.lit.critical { background: #ff6188; animation: btn-blink 1.1s steps(2) infinite; }
-@keyframes btn-blink { 50% { opacity: .35; } }
+/* Colour alone. A blinking lamp on a board of eight agents is a klaxon, and the
+   number of lit lamps already says how full the context is. */
+.led.lit.critical { background: #ff6188; }
 
 /* ---- engraved meta on the shell ---- */
 .shell-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -1234,9 +1281,14 @@ button.model-tag:hover { background: var(--lcd); }
   border-radius: 12px;
   background: color-mix(in srgb, var(--card-tint) 8%, var(--surface-2));
   border: 1px solid var(--border);
+  position: relative;  /* anchors the hover pad, see .card.tama::before */
   transition: transform .16s ease;
 }
 .grave-card:hover { transform: translate(-2px,-2px); border-color: var(--ink-2); }
+.grave-lineage {
+  font: 600 8.5px var(--mono); color: var(--muted); font-style: italic;
+  max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .grave-pet { width: 44px; opacity: .72; }
 .grave-pet .mascot { width: 100%; height: auto; }  /* .grave-pet wrapper sets the real size */
 .grave-card > div { max-width: 100%; }

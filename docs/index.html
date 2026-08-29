@@ -129,12 +129,16 @@ claim a visual change works without looking at something.
 <table>
   <tr><td>body colour</td><td>git repo (or the folder, outside a repo) — worktrees of one repo share it</td></tr>
   <tr><td>hat</td><td>the model: wizard&nbsp;/&nbsp;crown&nbsp;/&nbsp;poet&nbsp;/&nbsp;kitsune&nbsp;=&nbsp;Fable&nbsp;/&nbsp;Opus&nbsp;/&nbsp;Sonnet&nbsp;/&nbsp;Haiku</td></tr>
-  <tr><td>held item</td><td>git branch; <code>main</code> always gets the fairy wand</td></tr>
+  <tr><td>held item</td><td>git branch; <code>main</code> always gets the sword</td></tr>
   <tr><td>egg</td><td>no reply yet, so the model is unknown</td></tr>
 </table>
-<p>Hats occupy rows 0–3 (a few reach lower); items sit at x0–2 or x15–17, so the axes cannot
-collide. Eyes are drawn <em>before</em> hats so a hat can cover them. Items get an automatic
-dark rim (<code>haloOf</code>) — that is what keeps a pale item readable on a pale card.
+<p>Hats occupy rows 0–3 (a few reach lower); every item is held at x15–18, so the axes cannot
+collide — two items used to be drawn off-hand at x0–2, which is where the kitsune mask sits.
+Eyes are drawn <em>before</em> hats so a hat can cover them. Items get an automatic rim
+(<code>haloOf</code>) in the pet's <em>own</em> outline colour: it keeps a pale item readable
+on a pale card, and a hard black rim there was the only such edge on the sprite. Items are
+drawn in the lower-case pastel roles of <code>CLR</code>, hats in the saturated upper-case
+ones. The viewBox is inset by one cell on each side so those rims are not clipped.
 Colours and items are <em>assigned</em>, not hashed: the hash picks a preferred slot and
 collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</p>
 
@@ -145,6 +149,15 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
   <li><strong>Dialogs must be read from the pane</strong>, not from hooks. Detection accepts a
       <code>❯</code> cursor, an "Esc to cancel" line, or a yes-ish option — requiring "yes"
       made every AskUserQuestion menu invisible.</li>
+  <li><strong>A digit does not mean the same thing in every dialog.</strong> A permission
+      prompt takes it as the answer; an AskUserQuestion menu may only move its selection
+      cursor, so answering one did nothing until <code>send_key</code> followed up with Enter.
+      Two menus with identical footer hints behave differently, so <code>needs_confirm</code>
+      watches what the pane <em>did</em> — same question still up, cursor parked on that
+      option — rather than trying to classify the dialog.</li>
+  <li><strong>Option rows carry the preview panel.</strong> A menu with previews draws the box
+      to the right of each option on the same line, so labels have to be cut at the
+      box-drawing block.</li>
   <li><strong>The mode footer is not the last line.</strong> Trailing rows ("/clear to save
       488k tokens", the sub-agent roster) sit below it, so scan the last few lines upward.</li>
   <li><strong>The composer is not the last line either</strong> — it is the bottom-most
@@ -155,7 +168,11 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       Live ones come from the pane's agent roster (<code>●&nbsp;main</code> /
       <code>◯&nbsp;type</code>).</li>
   <li><strong>tmux daemonises</strong>, so a spawned session's process parent is the tmux
-      server. Lineage must be recorded while both sessions are alive.</li>
+      server. Lineage must be recorded while both sessions are alive — the link comes from the
+      parent's transcript (<code>_NEW_SESSION_RE</code>) or the spawn log, and it is keyed by
+      tmux <em>session name</em>, so reusing one name for several agents in turn only ever links
+      whichever was alive at the time. In the cemetery a headstone can only share a plot with a
+      launcher that is also dead; otherwise it just names the launcher on the card.</li>
   <li><strong>A transcript record can be larger than any fixed head window</strong> (one starts
       with a 205&nbsp;KB line). Read by lines, not bytes.</li>
   <li><strong><code>/proc/&lt;pid&gt;</code> mtime is not process start time.</strong> Use field 22
@@ -169,6 +186,24 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
   <li><strong>Agents on another host are invisible to <code>/proc</code> and tmux.</strong> A
       session inside <code>srun</code> shares <code>~/.claude</code> only; it is surfaced
       read-only.</li>
+  <li><strong>Compaction shows no elapsed timer for its first ~15 seconds</strong> — just
+      <code>✶ Compacting conversation…</code>. Keying the spinner off the timer therefore
+      reported nothing for most of a compaction pass. The animated glyph at the line start is
+      present from second zero, and the trailing <code>…</code> is what separates a live
+      spinner from a finished <code>✻ Crunched for 5s</code>.</li>
+  <li><strong><code>/model</code> opens its own "Switch model?" dialog</strong>, so the model
+      has not changed when <code>set_model</code> returns. It is surfaced on the card rather
+      than auto-confirmed: the dialog warns that the conversation is cached per model and the
+      whole history gets re-read.</li>
+  <li><strong>A working agent often has no spinner.</strong> Claude Code drops the spinner line
+      the moment prose starts streaming, leaving only "esc to interrupt" in the footer — and
+      nothing reaches the transcript until the turn ends. Compaction is the mirror case: its
+      spinner reads <code>Compacting conversation… (18s)</code> with a <code>▰▱ 19%</code> bar,
+      so the phrase regex must allow several words.</li>
+  <li><strong>A click needs mousedown and mouseup on the same element.</strong> Any
+      <code>innerHTML</code> rebuild landing between the two throws the click away, which is
+      what made buttons need pressing twice. Nothing re-renders while a pointer is held, and
+      transient UI state (an armed Kill button) lives in JS, never on the element.</li>
 </ul>
 
 <h2>Rendering rules</h2>
@@ -181,7 +216,25 @@ selection, the caret. So:</p>
   <li>never rebuild a container while it holds the focus or a live selection;</li>
   <li>update results in place rather than re-rendering controls the user is typing into;</li>
   <li>keep exactly one scroll container per view — a scrollable box nested in a scrollable
-      panel traps the wheel and loses its position.</li>
+      panel traps the wheel and loses its position;</li>
+  <li>hold transient UI state (an armed Kill button) in JS, never on the element, or the next
+      rebuild wipes it.</li>
+</ul>
+
+<h2>Motion</h2>
+<p>The board is meant to be calm, and everything twitchy has been a bug report:</p>
+<ul>
+  <li><strong>No <code>steps()</code> anywhere.</strong> A two-frame timeline is a hard jump with
+      nothing in between — a bump by construction. The pets do not move at all; state is carried
+      by the mood pill, the badge, the border and the context gauge.</li>
+  <li><strong>Pausing an animation on hover is worse than the animation.</strong> It snaps the
+      element from wherever the timeline had it back to zero, the instant the cursor arrives.</li>
+  <li><strong>Sliding an element on <code>:hover</code> can flicker.</strong> The shift moves it
+      out from under a cursor near its trailing edge, hover drops, it slides back, and it
+      oscillates. The fix is a negative-<code>z-index</code> <code>::before</code> pad inset past
+      the shift, sized under half the grid gap so neighbours never overlap.</li>
+  <li>Only <code>pulse</code> (a smooth opacity breathe), the one-shot <code>fade-up</code>, and
+      the deliberate walking loader remain.</li>
 </ul>
 
 <h2>Working agreements</h2>

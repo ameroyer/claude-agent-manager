@@ -887,15 +887,32 @@ def proc_foreground(pid):
     return fields[2] == fields[5]  # pgrp == tpgid
 
 
-# The spinner line while a turn runs: "✻ Razzle-dazzling… (3m 11s)". The word
-# can be hyphenated — the old [a-zA-Z]+ missed exactly those, so a working agent
-# read as idle. The elapsed-seconds parenthetical is what separates a live
-# spinner from a finished "✻ Crunched for 5s" or from prose ending in "…".
-_ACTIVITY_RE = re.compile(r"([A-Z][A-Za-z-]*…\s*\([^)]*\d+\s*s[^)]*\))")
+# The spinner line while a turn runs: "✻ Razzle-dazzling… (3m 11s)". The phrase
+# is one capitalised word, sometimes a few — compaction's "Compacting
+# conversation…" — and the word may be hyphenated or accented ("Sautéing"), so
+# neither [a-zA-Z]+ nor a single word is enough.
+_PHRASE = r"[A-Z][\w-]*(?: [\w-]+){0,3}…"
+# The frames of the animation the line starts with. Anchoring on the glyph is
+# what makes a *live* spinner distinguishable from a finished "✻ Crunched for
+# 5s" (no ellipsis) or from prose ending in "…" (no glyph). It matters because
+# compaction shows NO elapsed timer for its first ~15 seconds — just
+# "✶ Compacting conversation…" — so a rule that needs the timer reports nothing
+# at all for most of a compaction pass.
+_SPINNER_GLYPHS = "·✢✣✤✥✦✧✱✳✴✵✶✷✸✹✺✻✼✽✾✿"
+_SPINNER_RE = re.compile(rf"^\s*[{_SPINNER_GLYPHS}]\s+({_PHRASE}(?:\s*\([^)]*\))?)")
+# Fallback for a spinner drawn without a glyph at the line start: there the
+# elapsed parenthetical is the only thing separating it from ordinary prose.
+_ACTIVITY_RE = re.compile(rf"({_PHRASE}\s*\([^)]*\d+\s*s[^)]*\))")
+# Compaction draws a filled/hollow bar under its spinner: "▰▰▰▱▱▱ 19%".
+_PROGRESS_RE = re.compile(r"[▰▱]{4,}\s*(\d{1,3})\s*%")
 ACTIVITY_SCAN_LINES = 16
 _OPTION_RE = re.compile(r"^(?P<lead>[\s│>❯]*)(?P<key>\d)\.\s+(?P<label>.+?)\s*$")
 # Every blocking dialog Claude Code draws ends with this hint line.
 _DIALOG_HINT_RE = re.compile(r"esc to cancel", re.I)
+# An AskUserQuestion with previews draws the preview panel to the RIGHT of the
+# options, on the same rows, so the raw line is "2. Green   │ ████ …". Anything
+# from a run of spaces into the box-drawing block belongs to the panel.
+_PREVIEW_EDGE_RE = re.compile(r"\s{2,}[─-╿].*$")
 # A dialog always sits at the foot of the pane; a numbered list in the
 # conversation generally does not.
 PROMPT_TAIL_LINES = 12
@@ -940,7 +957,7 @@ def detect_prompt(lines):
     for i, ln in enumerate(lines):
         m = _OPTION_RE.match(ln)
         if m:
-            opts[m.group("key")] = m.group("label")[:60]
+            opts[m.group("key")] = _PREVIEW_EDGE_RE.sub("", m.group("label")).strip()[:60]
             cursor = cursor or "❯" in m.group("lead")
             last_at = i
     keys = sorted(opts)
@@ -1053,7 +1070,7 @@ def pane_status(target, out=None):
     Mode comes from the bottom status footer ('⏵⏵ auto mode on · …'). Activity
     is the spinner line while the agent works ('✽ Ideating… (1m 39s · ↓ 6.2k)')."""
     result = {"mode": None, "activity": None, "working": None, "prompt": None,
-              "subagents": []}
+              "progress": None, "subagents": []}
     if not target:
         return result
     if out is None:
@@ -1064,10 +1081,12 @@ def pane_status(target, out=None):
     result["working"] = False
     result["mode"] = footer_mode(lines)
     for ln in lines[-ACTIVITY_SCAN_LINES:]:
-        m = _ACTIVITY_RE.search(ln)
-        if m:
+        m = _SPINNER_RE.match(ln) or _ACTIVITY_RE.search(ln)
+        if m and not result["activity"]:
             result["activity"] = m.group(1)
-            break
+        p = _PROGRESS_RE.search(ln)
+        if p:
+            result["progress"] = min(100, int(p.group(1)))
     # A spinner line, or the footer offering to interrupt. Both are read from the
     # bottom of the pane only: searching the whole capture let the agent's own
     # echoed shell text ("esc to interrupt" in a grep) masquerade as the footer.
@@ -1234,10 +1253,19 @@ def load_names():
     return read_json(NAMES_FILE) or {}
 
 
+# Claude Code's session ids are uuids; the dashboard also mints "new-<pid>"
+# placeholders for a session it spawned before the real id is known.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
 def set_name(session_id, name):
-    """Persist a user-chosen display name for a session (empty clears it)."""
-    if not session_id:
-        return False, "no session"
+    """Persist a user-chosen display name for a session (empty clears it).
+
+    The id is only ever a key in a JSON map — nothing builds a path from it — but
+    it is still validated, so a malformed one is refused outright rather than
+    accumulating as junk in the names file."""
+    if not _SESSION_ID_RE.fullmatch(session_id or ""):
+        return False, "bad session id"
     name = (name or "").strip()[:60]
     names = load_names()
     if name:
@@ -1273,7 +1301,7 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
     last_exchange.sort(key=lambda m: iso_to_epoch(m["ts"]) or 0)  # chat order
     pstatus = pane_status(pane["target"], (captures or {}).get(pane["target"])) if pane else {
         "mode": None, "activity": None, "working": None, "prompt": None,
-        "subagents": []}
+        "progress": None, "subagents": []}
     # When the conversation last actually moved. Falls back to the file mtime
     # only when nothing in the tail carried a timestamp.
     last_activity = tinfo["last_activity"] or tinfo["mtime"]
@@ -1330,6 +1358,7 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
         "context_breakdown": tinfo["context_breakdown"],
         "permission_mode": pstatus["mode"] or tinfo["permission_mode"],
         "activity": pstatus["activity"] if state == "busy" else None,
+        "progress": pstatus["progress"] if state == "busy" else None,
         "pending_tool": tinfo["pending_tool"] if state == "needs_input" else None,
         "subagents": pstatus["subagents"] + [x for x in tinfo["subagents"]
                                             if not x["running"]][-3:],
@@ -1584,26 +1613,41 @@ def set_model(target, model):
     """Type `/model <id>` into the session (typed, not pasted, so the CLI parses
     it as a slash command) and report back what the pane shows, since the switch
     is otherwise invisible until the session's next reply. Deliberately never
-    sends Escape: that would interrupt an agent mid-turn."""
+    sends Escape: that would interrupt an agent mid-turn.
+
+    Claude Code answers `/model` with its own "Switch model?" dialog, so the
+    model has NOT changed when this returns. That dialog is left for you to
+    answer on the card rather than auto-confirmed here: it carries a real
+    consequence (the conversation is cached per model, so switching re-reads the
+    whole history) that the CLI deliberately puts in front of you.
+
+    Waits on what the pane shows rather than on fixed sleeps — the 1.3 s of
+    them this used to carry was most of the delay behind clicking a model."""
     if not _MODEL_ID_RE.fullmatch(model or ""):
         return False, "bad model id"
     if not valid_pane(target):
         return False, "unknown pane"
+    cmd = f"/model {model}"
     try:
         subprocess.run(["tmux", "send-keys", "-t", target, "C-u"],
                        timeout=5, check=True)
-        subprocess.run(["tmux", "send-keys", "-t", target, "-l", f"/model {model}"],
+        subprocess.run(["tmux", "send-keys", "-t", target, "-l", cmd],
                        timeout=5, check=True)
-        time.sleep(0.5)  # let the slash-command autocomplete settle
+        # The slash-command autocomplete needs a moment to settle; wait for the
+        # text to actually be in the composer instead of guessing at 500 ms.
+        wait_until(lambda: composer_holds(target, cmd), 1.0)
+        before = pane_lines(target)[-6:]
         subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
                        timeout=5, check=True)
-        time.sleep(0.8)  # let the CLI redraw before we look
+        wait_until(lambda: pane_lines(target)[-6:] != before, 1.5)
     except Exception as e:
         return False, str(e)
-    tail = [ln.strip() for ln in
-            run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-6"]).splitlines()
-            if ln.strip()]
-    return True, " | ".join(tail[-2:]) if tail else "sent"
+    lines = pane_lines(target)
+    prompt = detect_prompt(lines)
+    if prompt:
+        return True, "confirm on the card: " + (prompt["question"] or "switch model?")
+    tail = [ln.strip() for ln in lines[-2:]]
+    return True, " | ".join(tail) if tail else "sent"
 
 
 # Permission modes reachable by cycling Shift+Tab inside the session. Bypass is
@@ -1656,18 +1700,65 @@ def set_mode(target, mode):
 ALLOWED_KEYS = {"Enter", "Escape", "Up", "Down", "y", "n"} | {str(i) for i in range(1, 10)}
 
 
+def pane_lines(target, scroll=20):
+    """The pane's visible text as non-blank lines."""
+    out = run(["tmux", "capture-pane", "-p", "-t", target, "-S", f"-{scroll}"])
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
+def option_cursor(lines):
+    """Which numbered option the ❯ selection cursor currently sits on."""
+    for ln in lines:
+        m = _OPTION_RE.match(ln)
+        if m and "❯" in m.group("lead"):
+            return m.group("key")
+    return None
+
+
 def send_key(target, key):
-    """Send a single key (answer permission prompts, interrupt, ...)."""
+    """Send a single key (answer permission prompts, interrupt, ...).
+
+    A digit does not mean the same thing in every dialog. In a permission
+    prompt it picks the option and submits. In an AskUserQuestion menu it may
+    only move the selection cursor, leaving the dialog up — that is why
+    answering one from the dashboard used to do nothing at all. Two menus with
+    the same footer hint can differ, so rather than classify the dialog, watch
+    what the pane actually did: if the question is still up with the cursor
+    parked on the option we asked for, commit it with Enter. If it moved on by
+    itself, nothing more is sent — a stray Enter would otherwise land in the
+    composer or confirm something the digit never chose."""
     if key not in ALLOWED_KEYS:  # cheap check first, and a truthful error
         return False, "key not allowed"
     if not valid_pane(target):
         return False, "unknown pane"
+    before = detect_prompt(pane_lines(target)) if key.isdigit() else None
     try:
         subprocess.run(["tmux", "send-keys", "-t", target, key],
                        timeout=5, check=True)
+        if before and needs_confirm(target, before, key):
+            subprocess.run(["tmux", "send-keys", "-t", target, "Enter"],
+                           timeout=5, check=True)
     except Exception as e:
         return False, str(e)
     return True, "sent"
+
+
+def needs_confirm(target, before, key, timeout=1.0):
+    """True once the dialog is still asking `before`'s question with its cursor
+    on `key` — i.e. the digit selected but did not submit."""
+    parked = False
+
+    def settled():
+        nonlocal parked
+        lines = pane_lines(target)
+        now = detect_prompt(lines)
+        if now is None or now["question"] != before["question"]:
+            return True  # answered outright, or already on the next question
+        parked = option_cursor(lines) == key
+        return parked
+
+    wait_until(settled, timeout)
+    return parked
 
 
 def kill_session(session_id):

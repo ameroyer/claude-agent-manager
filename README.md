@@ -7,13 +7,17 @@ Each pet's look encodes where it lives, so you can read the fleet at a glance:
 
 | what you see | what it means |
 |---|---|
-| body colour | the model (Fable / Opus / Sonnet / Haiku) |
-| hat | the git repo — repo-mates wear the same hat and share the device tint |
-| held item | the git branch — everyone on `main` holds the same thing |
+| body colour | the git repo (or the folder, outside one) — worktrees of a repo share it, and so does the device tint |
+| hat | the model — wizard / crown / poet's hat / kitsune mask for Fable / Opus / Sonnet / Haiku |
+| held item | the git branch — everyone on `main` carries the sword |
 | an egg instead of a pet | the session hasn't replied yet, so its model is unknown |
 
-The mood pill, the pet's eyes and the three device lights track what the agent
-is doing right now.
+The mood pill, the badge and the card's border track what the agent is doing
+right now, and the device lights fill up as the session eats its context window.
+Nothing on a card blinks or twitches — the pets hold still. When an agent
+is mid-turn — writing a long reply, or compacting — a small pet strolls along a
+line at the foot of the conversation with its status walking behind it, because
+neither of those writes anything to the transcript until it finishes.
 
 I usually have a handful of Claude Code sessions running in tmux, each in its own
 window, and I kept losing track of which ones were stuck waiting on me. So this

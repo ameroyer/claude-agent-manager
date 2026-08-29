@@ -8,6 +8,19 @@ let agents = [];
 let editingName = false;  // pause head re-render while the rename input is open
 let lastPayload = "";
 let lastGridHtml = "";  // same idea as lastBodyHtml, for the shelf
+let lastHeadHtml = "", lastTabHtml = "", lastCountsHtml = "";  // ditto, the fixed chrome
+let killArmed = null;  // sessionId whose Kill button is showing "Confirm kill?"
+/* A click only fires when mousedown and mouseup land on the *same* element. The
+   poll rebuilds the shelf and the modal chrome with innerHTML, so a rebuild
+   arriving between the two threw the click away — which is why cards and the ✕
+   sometimes needed pressing twice. Nothing is rebuilt while a button is held. */
+let pointerHeld = false;
+document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+for (const ev of ["pointerup", "pointercancel"])
+  document.addEventListener(ev, () => { pointerHeld = false; }, true);
+// Releasing the button outside the window fires no pointerup here, and the
+// board would then be frozen until the next click.
+addEventListener("blur", () => { pointerHeld = false; });
 let spawnDir = "~/";  // server expands ~; refined from /api/state
 /* Past conversations — sessions that are no longer running. Fetched from its
    own endpoint on a slow timer, never from the 1s board poll: building it walks
@@ -183,7 +196,7 @@ const itemKeyOf = a => a.git?.branch ? "branch:" + a.git.branch
 /* The branch most sessions sit on deserves the nicest item, rather than
    whatever the hash happens to land on. Reserved, so nothing else takes it. */
 const MAIN_BRANCHES = ["main", "master", "trunk"];
-const MAIN_ITEM = "fairywand";
+const MAIN_ITEM = "sword";
 const isMainBranch = a => MAIN_BRANCHES.includes((a.git && a.git.branch) || "");
 
 /* Hashing a key straight onto a slot collides far more than intuition says:
@@ -258,9 +271,11 @@ function outlineOf(cells) {
 }
 const CREATURE_OUTLINE = outlineOf(CREATURE);
 
-/* The empty cells touching a sprite. Drawn dark behind a held item, it gives
-   the item a crisp rim — which is both the cute pixel-art look and the reason a
-   pale item (parchment, a white plume) still reads against a pale card. */
+/* The empty cells touching a sprite. Drawn behind a held item so a pale one
+   (parchment, a white plume) still reads against a pale card. It uses the pet's
+   own outline colour, not black: a hard black rim was the only such edge on the
+   sprite — neither the body nor the hat has one — and it made every item look
+   stuck on rather than held. */
 function haloOf(cells) {
   const has = new Set(cells.map(([x, y]) => x + "," + y));
   const out = new Set();
@@ -273,9 +288,14 @@ function haloOf(cells) {
   return [...out].map(k => k.split(",").map(Number));
 }
 
+// Upper case: the saturated set, worn by the hats, which have to stay legible at
+// legend size. Lower case: the pastel set the held items are drawn in — the hats
+// are the loud thing on the sprite and an item in hat colours fought them.
 const CLR = {A: null, G: "#ffd866", S: "#c7ced6", W: "#fdf6ee", D: "#9a6b3f",
              E: "#2d2a2e", P: "#5b53c9", R: "#e0453f", K: "#2a2730",
-             N: "#7fbf4d", C: "#5fc9e0", I: "#4f5a6b", B: "#8c5a3c"};
+             N: "#7fbf4d", C: "#5fc9e0", I: "#4f5a6b", B: "#8c5a3c",
+             g: "#ffe6a3", r: "#ffb3c1", p: "#cfc4f2", c: "#a9e2f0",
+             n: "#bce5a4", s: "#e2e8ee", d: "#cda684"};
 const paint = (role, accent) => CLR[role] || accent;
 
 // The eyes never change: two 1×2 rectangular pupils. Idle just dreams in zzz.
@@ -326,84 +346,116 @@ const HAT = {
             [2,6,"K"],[3,6,"W"],[4,6,"R"],[5,6,"K"]],               // rimmed snout
 };
 
-/* Cute fantasy kit. Right hand x15-17, off-hand x0-2, rows 0-9. Every item is
-   rimmed automatically (see ITEM_HALO), so shapes matter more than colours. */
+/* Cute fantasy kit, drawn in the pastel roles. Every item is held in the right
+   hand, x15-18, rows 0-10; the hand is the arm nub at y7-8, so an item wants to
+   reach down to about there. Two of them used to be held off-hand at x0-2,
+   which is exactly where the kitsune mask sits — a Haiku session with a shield
+   had the two sprites drawn on top of each other. Every item is rimmed automatically (see ITEM_HALO), so
+   shapes matter more than colours — at 84px a whole cell is four screen pixels,
+   which is why the shapes here are blunt silhouettes rather than fine detail.
+   One highlight pixel ("W") per item is what keeps a flat pastel blob reading
+   as a rounded object. */
 const ITEM = {
-  sword:     [[16,0,"W"],[16,1,"S"],[16,2,"S"],[16,3,"S"],[16,4,"S"],[16,5,"S"],
-              [15,6,"G"],[16,6,"G"],[17,6,"G"],[16,7,"D"],[16,8,"D"]],
-  shield:    [[0,5,"S"],[1,5,"S"],[0,6,"S"],[1,6,"A"],[0,7,"S"],[1,7,"A"],
-              [0,8,"S"],[1,8,"S"],[0,9,"S"],[1,9,"S"]],
-  fairywand: [[16,0,"G"],[15,1,"G"],[16,1,"G"],[17,1,"G"],[16,2,"G"],
-              [15,3,"G"],[17,3,"G"],                                  // sparkles
-              [16,4,"P"],[16,5,"P"],[16,6,"P"],[16,7,"P"],[16,8,"P"]],
-  elfstaff:  [[16,0,"N"],[15,1,"N"],[16,1,"N"],[17,1,"N"],            // leaves
-              [16,2,"G"],                                             // gem
-              [16,3,"D"],[16,4,"D"],[15,5,"N"],[16,5,"D"],
-              [16,6,"D"],[16,7,"D"],[16,8,"D"]],
-  spellbook: [[15,4,"P"],[16,4,"P"],[17,4,"P"],
-              [15,5,"P"],[16,5,"G"],[17,5,"P"],
-              [15,6,"P"],[16,6,"P"],[17,6,"P"],
-              [15,7,"W"],[16,7,"W"],[17,7,"W"]],
-  lantern:   [[16,2,"D"],[16,3,"D"],
-              [15,4,"S"],[16,4,"S"],[17,4,"S"],
-              [15,5,"G"],[16,5,"W"],[17,5,"G"],
-              [15,6,"G"],[16,6,"W"],[17,6,"G"],
-              [15,7,"S"],[16,7,"S"],[17,7,"S"]],
-  potion:    [[16,2,"D"],[16,3,"W"],
-              [15,4,"C"],[16,4,"C"],[17,4,"C"],
-              [15,5,"C"],[16,5,"W"],[17,5,"C"],
-              [15,6,"C"],[16,6,"C"],[17,6,"C"]],
-  crystal:   [[16,2,"C"],
-              [15,3,"C"],[16,3,"W"],[17,3,"C"],
-              [15,4,"C"],[16,4,"C"],[17,4,"C"],
-              [15,5,"C"],[16,5,"C"],[17,5,"C"],
-              [16,6,"C"]],
-  mushroom:  [[15,3,"R"],[16,3,"R"],[17,3,"R"],
-              [15,4,"R"],[16,4,"W"],[17,4,"R"],
-              [15,5,"R"],[16,5,"R"],[17,5,"R"],
+  sword:     [[16,0,"W"],[17,0,"s"],                                   // tip
+              [16,1,"W"],[17,1,"s"],
+              [16,2,"W"],[17,2,"s"],
+              [16,3,"W"],[17,3,"s"],
+              [15,4,"g"],[16,4,"g"],[17,4,"g"],[18,4,"g"],             // crossguard
+              [16,5,"d"],[17,5,"d"],[16,6,"d"],[17,6,"d"],             // grip
+              [16,7,"g"],[17,7,"g"]],                                  // pommel
+  shield:    [[15,3,"s"],[16,3,"s"],[17,3,"s"],[18,3,"s"],
+              [15,4,"s"],[16,4,"c"],[17,4,"c"],[18,4,"s"],
+              [15,5,"s"],[16,5,"W"],[17,5,"c"],[18,5,"s"],
+              [15,6,"s"],[16,6,"c"],[17,6,"c"],[18,6,"s"],
+              [16,7,"s"],[17,7,"s"],
+              [16,8,"s"]],
+  // A four-point star on a slim wand. It used to be a solid gold lump on a
+  // same-width stick, which read as a stick of dynamite.
+  fairywand: [[16,0,"g"],
+              [15,1,"g"],[16,1,"W"],[17,1,"g"],
+              [16,2,"g"],
+              [16,3,"p"],[16,4,"p"],[16,5,"p"],[16,6,"p"],[16,7,"p"],[16,8,"p"]],
+  elfstaff:  [[16,0,"n"],[15,1,"n"],[17,1,"n"],                        // leaves
+              [16,1,"c"],[16,2,"W"],                                   // gem
+              [16,3,"d"],[16,4,"d"],[15,5,"n"],[16,5,"d"],
+              [16,6,"d"],[16,7,"d"],[16,8,"d"]],
+  spellbook: [[15,3,"p"],[16,3,"p"],[17,3,"p"],[18,3,"p"],
+              [15,4,"p"],[16,4,"g"],[17,4,"g"],[18,4,"p"],             // clasp
+              [15,5,"p"],[16,5,"p"],[17,5,"p"],[18,5,"p"],
+              [15,6,"W"],[16,6,"W"],[17,6,"W"],[18,6,"W"],             // page block
+              [15,7,"W"],[16,7,"W"],[17,7,"W"],[18,7,"W"]],
+  lantern:   [[16,2,"d"],[15,3,"d"],[17,3,"d"],                        // hoop
+              [15,4,"s"],[16,4,"s"],[17,4,"s"],
+              [15,5,"g"],[16,5,"W"],[17,5,"g"],
+              [15,6,"g"],[16,6,"g"],[17,6,"g"],
+              [15,7,"s"],[16,7,"s"],[17,7,"s"]],
+  potion:    [[16,2,"d"],[16,3,"W"],                                   // cork, neck
+              [15,4,"W"],[16,4,"W"],[17,4,"W"],
+              [15,5,"r"],[16,5,"W"],[17,5,"r"],
+              [15,6,"r"],[16,6,"r"],[17,6,"r"],
+              [16,7,"r"]],
+  crystal:   [[16,2,"c"],
+              [15,3,"c"],[16,3,"W"],[17,3,"c"],
+              [15,4,"c"],[16,4,"c"],[17,4,"c"],
+              [15,5,"c"],[16,5,"c"],[17,5,"c"],
+              [16,6,"c"]],
+  mushroom:  [[15,3,"r"],[16,3,"r"],[17,3,"r"],
+              [15,4,"r"],[16,4,"W"],[17,4,"r"],
+              [15,5,"W"],[16,5,"W"],[17,5,"W"],                        // gills
               [16,6,"W"],[16,7,"W"],[16,8,"W"]],
-  acorn:     [[15,3,"D"],[16,3,"D"],[17,3,"D"],
-              [15,4,"B"],[16,4,"B"],[17,4,"B"],
-              [15,5,"B"],[16,5,"B"],[17,5,"B"],
-              [16,6,"B"],[16,2,"D"]],
-  apple:     [[16,2,"D"],[17,2,"N"],
-              [15,3,"R"],[16,3,"R"],[17,3,"R"],
-              [15,4,"R"],[16,4,"W"],[17,4,"R"],
-              [15,5,"R"],[16,5,"R"],[17,5,"R"],
-              [16,6,"R"]],
-  petleash:  [[2,2,"D"],[2,3,"D"],[1,4,"D"],
-              [0,5,"K"],[1,5,"K"],
-              [0,6,"A"],[1,6,"A"],[0,7,"A"],[1,7,"A"],
-              [0,8,"K"],[1,8,"K"]],
-  leek:      [[15,0,"N"],[17,0,"N"],[15,1,"N"],[16,1,"N"],[17,1,"N"],
-              [16,2,"N"],[16,3,"N"],
+  acorn:     [[16,2,"n"],                                              // stalk
+              [15,3,"d"],[16,3,"d"],[17,3,"d"],                        // cap
+              [15,4,"g"],[16,4,"g"],[17,4,"g"],
+              [15,5,"g"],[16,5,"W"],[17,5,"g"],
+              [16,6,"g"]],
+  apple:     [[16,2,"d"],[17,2,"n"],
+              [15,3,"r"],[16,3,"r"],[17,3,"r"],
+              [15,4,"r"],[16,4,"W"],[17,4,"r"],
+              [15,5,"r"],[16,5,"r"],[17,5,"r"],
+              [16,6,"r"]],
+  // A lead running down from the hand to a small round companion.
+  petleash:  [[15,4,"d"],[15,5,"d"],[16,6,"d"],                        // lead
+              [16,7,"g"],[18,7,"g"],                                   // ears
+              [16,8,"g"],[17,8,"g"],[18,8,"g"],
+              [16,9,"E"],[17,9,"g"],[18,9,"E"],                        // eyes
+              [16,10,"g"],[17,10,"g"],[18,10,"g"]],
+  leek:      [[15,0,"n"],[17,0,"n"],[15,1,"n"],[16,1,"n"],[17,1,"n"],
+              [16,2,"n"],[16,3,"n"],
               [16,4,"W"],[16,5,"W"],[16,6,"W"],[16,7,"W"],[16,8,"W"]],
-  teacup:    [[17,1,"W"],[16,2,"W"],
+  teacup:    [[17,1,"W"],[16,2,"W"],                                   // steam
               [15,4,"W"],[16,4,"W"],[17,4,"W"],
-              [15,5,"W"],[16,5,"W"],[17,5,"W"],
-              [15,6,"S"],[16,6,"S"],[17,6,"S"]],
-  sunflower: [[15,2,"G"],[16,2,"G"],[17,2,"G"],
-              [15,3,"G"],[16,3,"D"],[17,3,"G"],
-              [15,4,"G"],[16,4,"G"],[17,4,"G"],
-              [16,5,"N"],[16,6,"N"],[17,6,"N"],[16,7,"N"],[16,8,"N"]],
-  balloon:   [[16,0,"A"],[15,1,"A"],[16,1,"A"],[17,1,"A"],
-              [15,2,"A"],[16,2,"A"],[17,2,"A"],[16,3,"A"],
-              [16,4,"W"],[16,5,"W"],[16,6,"W"],[16,7,"W"]],
-  lollipop:  [[16,1,"R"],
-              [15,2,"R"],[16,2,"W"],[17,2,"R"],
-              [15,3,"R"],[16,3,"R"],[17,3,"R"],
-              [16,4,"R"],
-              [16,5,"W"],[16,6,"W"],[16,7,"W"],[16,8,"W"]],
-  umbrella:  [[16,1,"R"],[15,2,"R"],[16,2,"R"],[17,2,"R"],
-              [15,3,"R"],[16,3,"R"],[17,3,"R"],
-              [16,4,"D"],[16,5,"D"],[16,6,"D"],[16,7,"D"],[17,8,"D"],[16,8,"D"]],
-  scroll:    [[15,3,"D"],[16,3,"D"],[17,3,"D"],
-              [15,4,"W"],[16,4,"W"],[17,4,"W"],
-              [15,5,"W"],[16,5,"W"],[17,5,"W"],
+              [15,5,"W"],[16,5,"c"],[17,5,"W"],[18,5,"W"],             // handle
               [15,6,"W"],[16,6,"W"],[17,6,"W"],
-              [15,7,"D"],[16,7,"D"],[17,7,"D"]],
-  quill:     [[17,1,"W"],[16,2,"W"],[17,2,"W"],[16,3,"W"],[17,3,"W"],[16,4,"W"],
-              [16,5,"D"],[16,6,"D"],[16,7,"D"],[16,8,"D"]],
+              [15,7,"s"],[16,7,"s"],[17,7,"s"],[18,7,"s"]],            // saucer
+  sunflower: [[15,2,"g"],[16,2,"g"],[17,2,"g"],
+              [15,3,"g"],[16,3,"d"],[17,3,"g"],
+              [15,4,"g"],[16,4,"g"],[17,4,"g"],
+              [16,5,"n"],[16,6,"n"],[17,6,"n"],[16,7,"n"],[16,8,"n"]],
+  balloon:   [[16,0,"r"],
+              [15,1,"r"],[16,1,"W"],[17,1,"r"],
+              [15,2,"r"],[16,2,"r"],[17,2,"r"],
+              [16,3,"r"],
+              [16,4,"W"],[16,5,"W"],[16,6,"W"],[16,7,"W"]],
+  lollipop:  [[16,1,"r"],
+              [15,2,"r"],[16,2,"W"],[17,2,"r"],
+              [15,3,"W"],[16,3,"r"],[17,3,"r"],                        // swirl
+              [16,4,"r"],
+              [16,5,"W"],[16,6,"W"],[16,7,"W"],[16,8,"W"]],
+  umbrella:  [[16,0,"r"],
+              [15,1,"r"],[16,1,"W"],[17,1,"r"],
+              [15,2,"r"],[16,2,"r"],[17,2,"r"],
+              [15,3,"W"],[16,3,"r"],[17,3,"W"],                        // scallops
+              [16,4,"d"],[16,5,"d"],[16,6,"d"],[16,7,"d"],[16,8,"d"],[17,8,"d"]],
+  scroll:    [[15,3,"d"],[16,3,"d"],[17,3,"d"],[18,3,"d"],             // top rod
+              [15,4,"W"],[16,4,"W"],[17,4,"W"],[18,4,"W"],
+              [15,5,"W"],[16,5,"d"],[17,5,"d"],[18,5,"W"],             // writing
+              [15,6,"W"],[16,6,"W"],[17,6,"W"],[18,6,"W"],
+              [15,7,"d"],[16,7,"d"],[17,7,"d"],[18,7,"d"]],            // bottom rod
+  quill:     [[18,0,"W"],[17,1,"W"],[18,1,"W"],
+              [17,2,"W"],[18,2,"W"],[16,3,"W"],[17,3,"W"],
+              [16,4,"W"],[17,4,"W"],
+              [16,5,"g"],                                              // nib
+              [16,6,"d"],[16,7,"d"],[16,8,"d"]],
 };
 
 /* Rim for each item, computed once. */
@@ -430,12 +482,12 @@ function mascotSvg(a, cls = "", opts = {}) {
     EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
     (HAT[hat] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
     if (!opts.hideItem) {
-      (ITEM_HALO[item] || []).forEach(([x, y]) => cell(x, y, CLR.K));
+      (ITEM_HALO[item] || []).forEach(([x, y]) => cell(x, y, skin.outline));
       (ITEM[item] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
     }
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${cls}"
-    viewBox="0 0 18 14.2" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
+    viewBox="-1 -1 21 15.4" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
     aria-hidden="true">${px.join("")}</svg>`;
 }
 
@@ -925,6 +977,11 @@ function cardHtml(a) {
    full size with its children half size beside it. Lineage is only known for
    pairs the dashboard saw while both were alive (tmux daemonises, so nothing on
    disk connects them afterwards); everything else is a plain headstone. */
+/* Group a headstone under its launcher's headstone — but only when the launcher
+   is in the cemetery too. A session whose parent is still alive (or filtered
+   out) can't be plotted next to it, so it stays where it is and says who
+   launched it on the card instead; previously it showed as an orphan with no
+   sign it had ever had a parent. */
 function graveFamilies(list) {
   const present = new Set(list.map(a => a.sessionId));
   const kids = new Map();
@@ -1048,6 +1105,8 @@ function graveCardHtml(a, small) {
     title="${esc(a.display_name)}\n${esc(a.cwd)}\nborn ${esc(whenAbs(a.startedAt))}\nlast active ${esc(whenAbs(a.last_activity))}">
     <div class="grave-pet">${mascotSvg(a)}</div>
     <div class="grave-name">${esc(a.display_name)}</div>
+    ${a.spawned_by ? `<div class="grave-lineage" title="Launched by ${esc(a.spawned_by)}"
+      >↳ ${esc(a.spawned_by)}</div>` : ""}
     <div class="grave-path">${esc(a.cwd)}</div>
     ${a.git ? `<div class="grave-git">${esc(a.git.repo || a.project)} · ${esc(a.git.branch || "—")}</div>` : ""}
     <div class="grave-dates">
@@ -1158,10 +1217,11 @@ function lastExchangeHtml(a) {
     if (a.last_prompt) msgs.push({role: "user", text: a.last_prompt});
     if (a.last_assistant) msgs.push({role: "assistant", text: a.last_assistant});
   }
-  if (!msgs.length) return "";
+  const working = workingStripHtml(a);
+  if (!msgs.length && !working) return "";
   return `<div class="section">
     <div class="section-title">Last exchange</div>
-    <div class="chat">${renderChatEntries(a, withPending(a, msgs))}</div></div>`;
+    <div class="chat">${renderChatEntries(a, withPending(a, msgs))}${working}</div></div>`;
 }
 
 function summarySectionHtml(a) {
@@ -1272,6 +1332,41 @@ function renderChatEntries(a, msgs) {
   }).join("");
 }
 
+/* What the pane says the agent is doing, in a couple of words.
+
+   A long reply is the awkward case. Claude Code drops the spinner line the
+   moment prose starts streaming, and nothing reaches the transcript until the
+   turn ends — so for a minute at a time the conversation looked frozen even
+   though the footer still offered "esc to interrupt". Working with no spinner
+   is exactly that case, and it gets its own label rather than none.
+   Compaction is the other one: its spinner reads "Compacting conversation…"
+   with a progress bar, neither of which showed up here at all. */
+function workingLabel(a) {
+  const word = (a.activity || "").split("…")[0].trim();
+  if (/compact/i.test(word)) return "compacting the conversation";
+  // A progress bar means a long mechanical pass, never a reply being typed —
+  // don't guess "writing" for one just because its phrase was unreadable.
+  if (!word) return typeof a.progress === "number" ? "working" : "writing a reply";
+  return word.toLowerCase();
+}
+
+/* A pet strolling along a line under the last message, with its status walking
+   behind it, so a long silent turn still looks alive. The stroll is offset by
+   wall-clock time: the poll rebuilds this element, and without that the
+   animation would restart from the left edge on every rebuild. */
+const WALK_SECONDS = 11;  // must match the pet-stroll duration in style.css
+function workingStripHtml(a) {
+  if (a.state !== "busy") return "";
+  const pct = typeof a.progress === "number" ? ` ${a.progress}%` : "";
+  const phase = (Date.now() / 1000) % WALK_SECONDS;
+  return `<div class="work-strip"><div class="work-track">
+      <span class="work-walker" style="animation-delay:-${phase.toFixed(2)}s">
+        ${mascotSvg(a, "work-pet", {hideItem: true})}
+        <span class="work-label">${esc(workingLabel(a))}${pct}…</span>
+      </span>
+    </div></div>`;
+}
+
 /* The permission dialog the pane is showing, as the last entry in the
    conversation. It used to live only on the card and in Overview, so the
    Exchange read as though the agent had simply gone quiet mid-turn. */
@@ -1295,11 +1390,12 @@ function exchangeTab(a) {
     return `<div class="section"><div class="chat-loading">Loading conversation…</div></div>`;
   }
   const approval = approvalPromptHtml(a);
-  if (!chat.messages.length && !approval) {
+  const working = workingStripHtml(a);
+  if (!chat.messages.length && !approval && !working) {
     return `<div class="section"><div class="chat-loading">No conversation found in the transcript tail.</div></div>`;
   }
   return `<div class="section"><div class="chat">${
-    renderChatEntries(a, withPending(a, chat.messages))}${approval}</div></div>`;
+    renderChatEntries(a, withPending(a, chat.messages))}${approval}${working}</div></div>`;
 }
 
 /* ---------- artifacts: any .md/.txt files or folders you pin ---------- */
@@ -1451,7 +1547,9 @@ function modalHeadHtml(a) {
     <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
     ${a.tmux ? `<span class="tmux-tag" title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>` : ""}
     ${a.dead ? `<span class="grave-tag" title="This session is no longer running">ended ${ago(a.last_activity)}</span>`
-             : `<button class="kill-btn" data-sid="${esc(a.sessionId)}" title="Terminate this agent">Kill</button>`}
+             : `<button class="kill-btn${killArmed === a.sessionId ? " armed" : ""}"
+                  data-sid="${esc(a.sessionId)}" title="Terminate this agent"
+                  >${killArmed === a.sessionId ? "Confirm kill?" : "Kill"}</button>`}
     <button class="modal-close" title="Close (Esc)">✕</button>`;
 }
 
@@ -1516,6 +1614,7 @@ function startRename() {
   const holder = modal.querySelector(".name-holder");
   if (!a || !holder) return;
   editingName = true;
+  lastHeadHtml = "";  // hand-edited below; the cache must not think it's current
   holder.innerHTML =
     `<input class="rename-input" maxlength="60" value="${esc(a.display_name || a.name || "")}">`;
   const inp = holder.querySelector(".rename-input");
@@ -1673,12 +1772,24 @@ function renderModal() {
     modal.dataset.sid = a.sessionId;
     modal.innerHTML = `<div class="modal-head"></div><div class="tabbar"></div>
       <div class="modal-body"></div>${composerHtml(a)}`;
-    lastBodyHtml = "";  // fresh shell, nothing rendered into it yet
+    lastBodyHtml = lastHeadHtml = lastTabHtml = "";  // fresh shell, nothing in it yet
     wireComposer();
   }
   if (!TABS.find(t => t.id === activeTab)?.show(a)) activeTab = "overview";
-  if (!editingName) modal.querySelector(".modal-head").innerHTML = modalHeadHtml(a);
-  modal.querySelector(".tabbar").innerHTML = tabbarHtml(a);
+  // The header and the tab bar hold the ✕, Kill and rename buttons. Rewriting
+  // them on every tick destroyed and recreated those buttons under the cursor.
+  if (!editingName) {
+    const head = modalHeadHtml(a);
+    if (head !== lastHeadHtml) {
+      modal.querySelector(".modal-head").innerHTML = head;
+      lastHeadHtml = head;
+    }
+  }
+  const tabs = tabbarHtml(a);
+  if (tabs !== lastTabHtml) {
+    modal.querySelector(".tabbar").innerHTML = tabs;
+    lastTabHtml = tabs;
+  }
   const body = modal.querySelector(".modal-body");
   if (body.contains(document.activeElement) &&
       document.activeElement.classList.contains("art-add")) return;  // mid-typing
@@ -1728,7 +1839,8 @@ function openModal(sid) {
 
 function closeModal() {
   openSid = null;
-  lastBodyHtml = "";
+  killArmed = null;
+  lastBodyHtml = lastHeadHtml = lastTabHtml = "";
   modal.dataset.sid = "";
   overlay.classList.add("hidden");
 }
@@ -1754,12 +1866,17 @@ function graveFilterFocused() {
 }
 
 function render(force) {
+  if (pointerHeld && !force) return;  // a click is in progress; don't move the DOM
   const byState = {needs_input: 0, waiting: 0, busy: 0, idle: 0};
   agents.forEach(a => byState[a.state] = (byState[a.state] || 0) + 1);
-  counts.innerHTML = Object.entries(byState)
+  const countsHtml = Object.entries(byState)
     .filter(([, n]) => n)
     .map(([s, n]) => `<span class="stat ${s}"><span class="dot ${s}"></span><b>${n}</b> ${STATE_LABEL[s]}</span>`)
     .join("");
+  if (countsHtml !== lastCountsHtml) {  // the tallies rarely move; don't rewrite them every tick
+    counts.innerHTML = countsHtml;
+    lastCountsHtml = countsHtml;
+  }
   // Don't yank an open picker, text you're in the middle of selecting, or a
   // cemetery dropdown someone has open. Everything outside the grid refreshes.
   if (!grid.querySelector(".model-menu") && !hasSelectionIn(grid)
@@ -1840,8 +1957,10 @@ const MODEL_IDS = {Fable: "claude-fable-5", Opus: "claude-opus-5",
 
 async function setModel(target, model) {
   const r = await post("/api/model", {target, model});
-  toast(r.ok ? `Sent /model ${model}. The pill updates after the next reply.\n${r.msg}`
-             : `Model switch failed: ${r.msg}`, !r.ok);
+  // The CLI answers /model with its own confirmation, so don't claim the switch
+  // happened — say what the pane actually shows.
+  toast(r.ok ? r.msg : `Model switch failed: ${r.msg}`, !r.ok);
+  tick();  // surface that confirmation on the card straight away
 }
 
 async function setMode(target, mode) {
@@ -1879,22 +1998,25 @@ function openPickMenu(btn, kind) {
     () => menu.remove(), {once: true}), 0);
 }
 
+/* The armed "Confirm kill?" state used to live on the button element itself.
+   The poll rebuilds the modal header, so it was wiped roughly once a second and
+   the confirmation vanished before you could reach it. It is state, so it lives
+   in state and is rendered from there. */
 async function killAgent(btn) {
-  if (btn.dataset.armed !== "1") {
-    btn.dataset.armed = "1";
-    btn.textContent = "Confirm kill?";
-    btn.classList.add("armed");
+  const sid = btn.dataset.sid;
+  if (killArmed !== sid) {
+    killArmed = sid;
+    renderModal();
     setTimeout(() => {
-      if (btn.isConnected && btn.dataset.armed === "1") {
-        btn.dataset.armed = "0";
-        btn.textContent = "Kill";
-        btn.classList.remove("armed");
-      }
+      if (killArmed !== sid) return;
+      killArmed = null;
+      if (openSid) renderModal();
     }, 8000);  // 3s was faster than most people can move a mouse
     return;
   }
+  killArmed = null;
   btn.textContent = "Killing…";
-  const ok = (await post("/api/kill", {sid: btn.dataset.sid})).ok;
+  const ok = (await post("/api/kill", {sid})).ok;
   if (ok) { closeModal(); tick(); }
   else { btn.textContent = "Kill failed"; }
 }
