@@ -220,12 +220,21 @@ main {
 
 .dim { color: var(--muted); }
 
+/* Each permission mode has its own hue, so how much rope an agent has been
+   given is readable across the shelf without parsing the word. The ramp runs
+   from "asks about everything" to "does what it likes". */
+.mode-chip.m-default { --mode-hue: var(--muted); }
+.mode-chip.m-plan { --mode-hue: #6f86e0; }
+.mode-chip.m-acceptEdits { --mode-hue: var(--warning); }
+.mode-chip.m-auto { --mode-hue: var(--good); }
+.mode-chip.m-bypassPermissions { --mode-hue: var(--critical); }
 .mode-chip {
+  --mode-hue: var(--muted);
   font: 650 10.5px var(--mono);
   padding: 1px 7px;
   border-radius: 999px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--mode-hue) 14%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--mode-hue) 55%, var(--border));
   color: var(--muted);
   white-space: nowrap;
 }
@@ -446,6 +455,7 @@ main {
   overflow: hidden;
 }
 .modal-head {
+  position: relative;  /* anchors the model/mode popup opened from here */
   display: flex;
   align-items: center;
   gap: 12px;
@@ -456,6 +466,14 @@ main {
   background: linear-gradient(var(--surface-2), var(--surface));
 }
 .modal-head .agent-name { font-size: 16px; }
+/* The open pet's header carries the same two controls as its card: which model
+   it runs and how much rope it has, both clickable. */
+.modal-head .mode-chip { flex-shrink: 0; margin-left: -6px; }
+.modal-head button.mode-chip { cursor: pointer; }
+.modal-head button.mode-chip:hover {
+  color: color-mix(in srgb, var(--mode-hue) 80%, var(--ink));
+  border-color: var(--mode-hue);
+}
 .modal-close, .kill-btn {
   height: 30px;
   border-radius: 8px;
@@ -891,8 +909,13 @@ button.model-tag { cursor: pointer; }
 button.model-tag:hover { background: var(--lcd); }
 /* model chooser: a real popup, not a native select element (whose
    blur-on-open quirk closed it before it could be used) */
+/* Positioned in script against the button that opened it (see placeMenu), not
+   with offsets inside whatever container it happens to sit in — those were
+   tuned for a card, and put the mode menu off the top of the modal header where
+   it was clipped and unclickable. Fixed, and in <body>, so no ancestor's
+   overflow or stacking context can crop it. */
 .model-menu {
-  position: absolute; right: 14px; top: 40px; z-index: 20;
+  position: fixed; top: 0; left: 0; z-index: 80;
   display: flex; flex-direction: column; gap: 2px;
   padding: 4px;
   background: var(--lcd-hi);
@@ -907,8 +930,7 @@ button.model-tag:hover { background: var(--lcd); }
   text-align: left;
 }
 .model-menu button:hover { background: var(--surface-3); }
-/* the mode chip sits on the shell's bottom row, so its menu opens upward */
-.model-menu.at-foot { top: auto; right: auto; bottom: 36px; left: 14px; }
+.model-menu button:active { transform: translateY(1px); }
 
 /* theme switch */
 .theme-btn {
@@ -1121,6 +1143,13 @@ button.model-tag:hover { background: var(--lcd); }
   border: 1.5px solid color-mix(in srgb, var(--shell-ink) 30%, transparent);
   border-radius: 6px; padding: 2px 8px;
 }
+/* ...but the mode keeps its own colour down here too — this chip is the one on
+   the shelf, so it is the one that has to be readable at a glance. */
+.tama-foot .mode-chip {
+  color: color-mix(in srgb, var(--mode-hue) 72%, var(--shell-ink));
+  background: color-mix(in srgb, var(--mode-hue) 26%, transparent);
+  border-color: color-mix(in srgb, var(--mode-hue) 60%, transparent);
+}
 .tama-foot .tmux-tag::before { content: "▸ "; opacity: .7; }
 /* only the mode chip is interactive down here, and only when it has a pane */
 .tama-foot button.mode-chip { cursor: pointer; }
@@ -1319,3 +1348,14 @@ button.model-tag:hover { background: var(--lcd); }
   font: 600 11px var(--mono); color: var(--muted);
   border: 1px solid var(--border); border-radius: 7px; padding: 3px 9px;
 }
+/* Bring a past conversation back as a running agent. */
+.revive-btn {
+  font: 700 11px var(--mono); cursor: pointer;
+  color: var(--good); background: color-mix(in srgb, var(--good) 12%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--good) 55%, var(--border));
+  border-radius: 7px; padding: 3px 10px; margin-left: 6px;
+  transition: filter .12s ease;
+}
+.revive-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.revive-btn:active { transform: translateY(1px); }
+.revive-btn:disabled { opacity: .6; cursor: default; }

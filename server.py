@@ -107,15 +107,29 @@ def beta_1m_enabled():
     return "[1m]" in settings.get("model", "")
 
 
-def context_window_for(model, ctx_tokens):
-    """Window for a session: its model's row × whether the 1M beta is on. A
-    prompt already past 200k proves the 1M window regardless of the above."""
+# Largest prompt each live session has been seen holding. The window cannot be
+# read from the model name — two sessions on the same `claude-opus-5` can sit on
+# different windows, and neither the transcript, the session registry nor
+# ~/.claude records which. The only evidence is behavioural, so it is the
+# high-water mark that matters, not the current size: after a compaction the
+# prompt drops back under 200k, and inferring from *that* would silently halve
+# the window and make the percentage jump up right after compacting.
+_ctx_peak = {}
+
+
+def context_window_for(model, ctx_tokens, session_id=None):
+    """Window for a session: its model's row × whether the 1M beta is on, raised
+    to 1M if this session has ever been observed holding more than 200k — which
+    it could not do on a 200k window."""
     if CONTEXT_WINDOW_OVERRIDE:
         return CONTEXT_WINDOW_OVERRIDE
     key = (model or "").split("[")[0].strip()
     default_w, max_w = MODEL_WINDOWS.get(key, DEFAULT_WINDOWS)
     window = max_w if beta_1m_enabled() else default_w
-    if (ctx_tokens or 0) > 200_000:
+    peak = ctx_tokens or 0
+    if session_id:
+        peak = _ctx_peak[session_id] = max(_ctx_peak.get(session_id, 0), peak)
+    if peak > 200_000:
         window = max(window, 1_000_000)
     return window
 
@@ -1312,7 +1326,7 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
         notif_msg = last_event.get("message")
     ctx_tokens = tinfo["context_tokens"]
     ctx_model = (tinfo["context_breakdown"] or {}).get("model")
-    ctx_window = context_window_for(ctx_model, ctx_tokens)
+    ctx_window = context_window_for(ctx_model, ctx_tokens, sid)
     in_progress = [t for t in tasks if t["status"] == "in_progress"]
     status = load_agent_status(sid)
     user_name = (names or {}).get(sid)
@@ -1479,7 +1493,7 @@ def build_state():
     # conversations use the same caches, and evicting them every second made
     # opening one re-read its transcript on every poll.
     for cache, cap in ((_tail_cache, 200), (_chat_cache, 60), (_mcp_state_cache, 200),
-                       (_git_cache, 200), (_history_row_cache, 500)):
+                       (_git_cache, 200), (_history_row_cache, 500), (_ctx_peak, 200)):
         if len(cache) > cap:
             cache.clear()
     spawn_dir = os.path.join(HOME, "projects")

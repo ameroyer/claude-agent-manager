@@ -7,7 +7,8 @@ let openSid = null;
 let agents = [];
 let editingName = false;  // pause head re-render while the rename input is open
 let lastPayload = "";
-let lastGridHtml = "";  // same idea as lastBodyHtml, for the shelf
+let lastGridKeys = "";     // the shelf's shape: which cards, in what order
+let lastGridParts = [];    // each slot's last-written markup, so only changes are written
 let lastHeadHtml = "", lastTabHtml = "", lastCountsHtml = "";  // ditto, the fixed chrome
 let killArmed = null;  // sessionId whose Kill button is showing "Confirm kill?"
 /* A click only fires when mousedown and mouseup land on the *same* element. The
@@ -686,6 +687,21 @@ const MODE_SHORT = {default: "manual", acceptEdits: "auto-edit", plan: "plan",
 // separate opt-in with its own confirmation, so it is displayed but never set.
 const MODE_CYCLE = ["default", "acceptEdits", "plan", "auto"];
 
+/* The permission mode, as a chip you can click to change it. One helper so the
+   card's foot and the open pet's header cannot drift apart. The `m-<mode>`
+   class carries the colour: at a glance across the shelf, which agents are
+   allowed to act on their own is worth reading without stopping to parse text. */
+function modeChipHtml(a, extra = "") {
+  if (!a.permission_mode) return "";
+  const short = MODE_SHORT[a.permission_mode] || a.permission_mode;
+  const full = MODE_LABEL[a.permission_mode] || a.permission_mode;
+  const cls = `mode-chip m-${esc(a.permission_mode)}${extra ? " " + extra : ""}`;
+  return a.tmux
+    ? `<button class="${cls}" data-target="${esc(a.tmux.target)}"
+         title="Permission mode: ${esc(full)} — click to change">${esc(short)}</button>`
+    : `<span class="${cls}" title="Permission mode: ${esc(full)}">${esc(short)}</span>`;
+}
+
 /* Colour a menu option by what it does. Keyed on the label rather than the
    position, because a question menu ("1. Red / 2. Green") has no affirmative
    first option to paint green. */
@@ -774,13 +790,24 @@ function fmtTokens(n) {
   return String(n);
 }
 
-/* Context-window usage: {pct, label, level} or null. */
+/* Context-window usage: {pct, label, title, level} or null.
+
+   Two sessions can show a small percentage on a big token count and a big
+   percentage on a small one, because the *window* differs: a session already
+   holding more than 200k tokens is necessarily on the 1M window, so 361k reads
+   as 36% while a 147k session on the 200k window reads as 74%. The card shows
+   the denominator for that reason — "36% ctx · 361k of 1M" is comparable at a
+   glance, "36% ctx · 361k tokens" is not. */
 function contextInfo(a) {
   if (!a.context_tokens || !a.context_window) return null;
   const pct = Math.min(100, Math.round(a.context_tokens / a.context_window * 100));
   const level = pct >= 85 ? "critical" : pct >= 65 ? "warn" : "ok";
-  return {pct, level,
-    label: `${fmtTokens(a.context_tokens)} / ${fmtTokens(a.context_window)}`};
+  const label = `${fmtTokens(a.context_tokens)} / ${fmtTokens(a.context_window)}`;
+  return {pct, level, label,
+    title: `The last turn's prompt was ${a.context_tokens.toLocaleString()} tokens, `
+         + `against this session's ${a.context_window.toLocaleString()}-token window `
+         + `(${pct}% full — higher means closer to compacting). Percentages are only `
+         + `comparable between sessions on the same window.`};
 }
 
 function contextMeterHtml(a) {
@@ -937,11 +964,11 @@ function cardHtml(a) {
       <div class="lcd-dir" title="Working directory: ${esc(a.cwd)}">${esc(a.cwd)}</div>
       <div class="tama-mid">
         <div class="tama-stats">
-          ${ctx ? `<div class="stat-big ${ctx.level}" title="Context window used: ${ctx.label}. Higher = closer to compacting.">
+          ${ctx ? `<div class="stat-big ${ctx.level}" title="${esc(ctx.title)}">
             <span class="stat-pair"><span class="stat-num">${ctx.pct}%</span><span class="stat-unit">ctx</span></span>
-            <span class="stat-pair"><span class="stat-num">${fmtTokens(a.context_tokens)}</span><span class="stat-unit">tokens</span></span>
+            <span class="stat-pair"><span class="stat-num">${fmtTokens(a.context_tokens)}</span><span class="stat-unit">of ${fmtTokens(a.context_window)}</span></span>
           </div>` : ""}
-          <div class="stat-sub" title="${done}/${total} tasks done">${total ? `${done}/${total} tasks` : "no tasks"}</div>
+          ${total ? `<div class="stat-sub" title="${done}/${total} tasks done">${done}/${total} tasks</div>` : ""}
           <div class="stat-sub state-word ${esc(a.state)}">${STATE_LABEL[a.state] || esc(a.state)}</div>
         </div>
         <div class="tama-pet">${mascotSvg(a)}<div class="pet-ground"></div></div>
@@ -960,10 +987,7 @@ function cardHtml(a) {
       ${(a.spawns || []).length ? `<div class="lineage" title="Sessions this agent launched: ${esc(a.spawns.join(", "))}"><b>spawns</b> ${esc(a.spawns.join(", "))}</div>` : ""}
     </div>
     <div class="tama-foot">
-      ${a.permission_mode ? (a.tmux
-        ? `<button class="mode-chip" data-target="${esc(a.tmux.target)}"
-             title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)} — click to change">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</button>`
-        : `<span class="mode-chip" title="Permission mode: ${esc(MODE_LABEL[a.permission_mode] || a.permission_mode)}">${esc(MODE_SHORT[a.permission_mode] || a.permission_mode)}</span>`) : ""}
+      ${modeChipHtml(a)}
       ${a.tmux ? `<span class="tmux-tag"
          title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>`
        : a.remote ? `<span class="tmux-tag remote"
@@ -1243,7 +1267,9 @@ function detailsSectionHtml(a) {
                      + ` · ${a.git.branch} @ ${a.git.commit}` : "—"],
     ["tmux", a.tmux ? a.tmux.target : a.remote ? "on another machine" : "not found"],
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
-    ["Context", a.context_tokens ? `${a.context_tokens.toLocaleString()} tokens` : "–"],
+    ["Context", a.context_tokens
+      ? `${a.context_tokens.toLocaleString()} of ${(a.context_window || 0).toLocaleString()} tokens`
+      : "–"],
     ["Launched by", a.spawned_by || "started on its own"],
     ["Spawned", (a.spawns || []).length ? a.spawns.join(", ") : "–"],
     ["Born", a.startedAt ? `${whenAbs(a.startedAt)} (${ago(a.startedAt)})` : "–"],
@@ -1543,10 +1569,16 @@ function modalHeadHtml(a) {
       <span class="agent-name" title="${esc(a.name)}">${esc(a.display_name || a.name)}</span>
       <button class="rename-btn" title="Rename this pet">✎</button>
     </span>
-    <span class="model-tag" style="color:${model.outline}" title="Model — mascot colour">${esc(model.label)}</span>
+    ${a.tmux
+      ? `<button class="model-tag" data-target="${esc(a.tmux.target)}" style="color:${model.outline}"
+           title="Model (the pet's hat) — click to switch">${esc(model.label)}</button>`
+      : `<span class="model-tag" style="color:${model.outline}" title="Model — the pet's hat">${esc(model.label)}</span>`}
+    ${modeChipHtml(a, "head-mode")}
     <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
     ${a.tmux ? `<span class="tmux-tag" title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>` : ""}
-    ${a.dead ? `<span class="grave-tag" title="This session is no longer running">ended ${ago(a.last_activity)}</span>`
+    ${a.dead ? `<span class="grave-tag" title="This session is no longer running">ended ${ago(a.last_activity)}</span>
+      <button class="revive-btn" data-sid="${esc(a.sessionId)}" data-cwd="${esc(a.cwd || "")}"
+        title="Start a new agent in ${esc(a.cwd || "its folder")} that resumes this conversation (claude --resume)">↑ Resurrect</button>`
              : `<button class="kill-btn${killArmed === a.sessionId ? " armed" : ""}"
                   data-sid="${esc(a.sessionId)}" title="Terminate this agent"
                   >${killArmed === a.sessionId ? "Confirm kill?" : "Kill"}</button>`}
@@ -1865,6 +1897,41 @@ function graveFilterFocused() {
   return !!(el && el.classList && GRAVE_CONTROLS.some(c => el.classList.contains(c)));
 }
 
+/* Write the shelf one card at a time.
+
+   This used to be a single `grid.innerHTML = everything`, guarded by comparing
+   the whole string. Measured against a live board, that string differs on 100%
+   of polls — a "5s ago" ticking over on any one card is enough — so *every*
+   card element was destroyed and recreated 1.7 times a second, including
+   completely unchanged ones.
+
+   That is what "hover bumping" was, and why fixing keyframes never touched it:
+   a card under the cursor was reborn with `transform: none`, matched `:hover`
+   immediately, and slid 0 → -2px again on every single poll. Now a card is only
+   replaced when its own markup changed, and never while the pointer is on it —
+   it refreshes as soon as you move away. */
+function paintGrid(parts) {
+  const onACard = [...grid.children].some(n => n.matches(":hover"));
+  const keys = parts.map(p => p[0]).join("|");
+  if (keys !== lastGridKeys) {  // membership or order moved: one clean rebuild
+    // ...unless the cursor is on a card. A wholesale rebuild would recreate it
+    // unhovered and slide it, which is the one remaining way to bump. Shelf
+    // reshuffles are rare, and this one lands as soon as you move the mouse.
+    if (onACard && lastGridKeys) return;
+    grid.innerHTML = parts.map(p => p[1]).join("");
+    lastGridKeys = keys;
+    lastGridParts = parts.map(p => p[1]);
+    return;
+  }
+  parts.forEach(([, html], i) => {
+    if (html === lastGridParts[i]) return;
+    const node = grid.children[i];
+    if (!node || node.matches(":hover")) return;  // leave what's under the cursor
+    node.outerHTML = html;
+    lastGridParts[i] = html;
+  });
+}
+
 function render(force) {
   if (pointerHeld && !force) return;  // a click is in progress; don't move the DOM
   const byState = {needs_input: 0, waiting: 0, busy: 0, idle: 0};
@@ -1879,43 +1946,48 @@ function render(force) {
   }
   // Don't yank an open picker, text you're in the middle of selecting, or a
   // cemetery dropdown someone has open. Everything outside the grid refreshes.
-  if (!grid.querySelector(".model-menu") && !hasSelectionIn(grid)
+  // The picker now lives in <body>, not inside the card, so look for it there —
+  // otherwise a rebuild would replace the button it is anchored to.
+  if (!document.querySelector(".model-menu") && !hasSelectionIn(grid)
       && (force || !graveFilterFocused())) {
-    const gridHtml = agents.length
-      ? GROUPS.map(g => {
-          const list = agents.filter(a => g.states.includes(a.state));
-          if (!list.length) return "";
-          // Most recent exchange first. Sorted on last_activity (the newest
-          // timestamped record) rather than the transcript's file mtime, which
-          // Claude Code bumps on week-old conversations for its own bookkeeping
-          // and which therefore ordered the board almost at random.
-          // "Working" stays alphabetical so busy cards don't reshuffle each tick.
-          if (g.id !== "working")
-            list.sort((x, y) => (y.last_activity || 0) - (x.last_activity || 0));
-          return `<div class="group-head ${g.id}">
-              <span class="group-label">${g.label}</span>
-              <span class="group-count">${list.length}</span>
-              <span class="group-rule"></span>
-            </div>` + list.map(cardHtml).join("");
-        }).join("")
-      : `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`;
-    const shown = graveOpen ? graveSorted(history.filter(graveMatches)) : [];
-    const graveHtml = history.length ? `<div class="group-head grave">
-        <span class="group-label">Past sessions</span>
-        <span class="group-count">${history.length}</span>
-        <span class="group-rule"></span>
-        <button class="grave-toggle">${graveOpen ? "hide" : "show"}</button>
-      </div>` + (graveOpen
-        ? graveFilterHtml(shown.length, history.length)
-          + `<div class="grave-grid">${graveFamilies(shown).map(graveFamilyHtml).join("")
-             || '<div class="empty">Nothing matches that filter.</div>'}</div>` : "")
-      : "";
-    // Only rebuild the shelf when it would actually look different; otherwise
-    // the page scroll (and any hover) is disturbed once a second for nothing.
-    if (gridHtml + graveHtml !== lastGridHtml) {
-      grid.innerHTML = gridHtml + graveHtml;
-      lastGridHtml = gridHtml + graveHtml;
+    const parts = [];  // [key, html] in shelf order — see paintGrid
+    if (agents.length) {
+      for (const g of GROUPS) {
+        const list = agents.filter(a => g.states.includes(a.state));
+        if (!list.length) continue;
+        // Most recent exchange first. Sorted on last_activity (the newest
+        // timestamped record) rather than the transcript's file mtime, which
+        // Claude Code bumps on week-old conversations for its own bookkeeping
+        // and which therefore ordered the board almost at random.
+        // "Working" stays alphabetical so busy cards don't reshuffle each tick.
+        if (g.id !== "working")
+          list.sort((x, y) => (y.last_activity || 0) - (x.last_activity || 0));
+        parts.push([`head:${g.id}`, `<div class="group-head ${g.id}">
+            <span class="group-label">${g.label}</span>
+            <span class="group-count">${list.length}</span>
+            <span class="group-rule"></span>
+          </div>`]);
+        for (const a of list) parts.push([`card:${a.sessionId}`, cardHtml(a)]);
+      }
+    } else {
+      parts.push(["empty", `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`]);
     }
+    if (history.length) {
+      const shown = graveOpen ? graveSorted(history.filter(graveMatches)) : [];
+      parts.push(["head:grave", `<div class="group-head grave">
+          <span class="group-label">Past sessions</span>
+          <span class="group-count">${history.length}</span>
+          <span class="group-rule"></span>
+          <button class="grave-toggle">${graveOpen ? "hide" : "show"}</button>
+        </div>`]);
+      if (graveOpen) {
+        parts.push(["grave-filter", graveFilterHtml(shown.length, history.length)]);
+        parts.push(["grave-grid", `<div class="grave-grid">${
+          graveFamilies(shown).map(graveFamilyHtml).join("")
+          || '<div class="empty">Nothing matches that filter.</div>'}</div>`]);
+      }
+    }
+    paintGrid(parts);
   }
   document.title = agents.some(a => a.state === "needs_input")
     ? "⚠ TamaClaudchi" : "TamaClaudchi";
@@ -1972,18 +2044,38 @@ async function setMode(target, mode) {
 
 const PICKERS = {
   model: {items: () => Object.entries(MODEL_IDS), apply: setModel},
-  mode:  {items: () => MODE_CYCLE.map(id => [MODE_LABEL[id], id]), apply: setMode,
-          foot: true},  // the mode chip lives at the bottom of the card
+  mode:  {items: () => MODE_CYCLE.map(id => [MODE_LABEL[id], id]), apply: setMode},
 };
+
+/* Put the popup against the button that opened it, clamped to the viewport.
+   It used to be positioned with fixed offsets inside whatever container it was
+   appended to — offsets tuned for a card, which dropped the mode menu off the
+   top of the modal header, clipped and unclickable. Measured, then flipped
+   above the button when there is no room below. */
+function placeMenu(menu, btn) {
+  const PAD = 8, GAP = 4;
+  const b = btn.getBoundingClientRect();
+  const m = menu.getBoundingClientRect();
+  const vh = window.innerHeight || 800, vw = window.innerWidth || 1200;
+  let top = b.bottom + GAP;
+  if (top + m.height > vh - PAD) top = b.top - m.height - GAP;   // open upward
+  top = Math.max(PAD, Math.min(top, vh - m.height - PAD));
+  const left = Math.max(PAD, Math.min(b.left, vw - m.width - PAD));
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.left = `${Math.round(left)}px`;
+}
 
 function openPickMenu(btn, kind) {
   const spec = PICKERS[kind];
-  document.querySelectorAll(".model-menu").forEach(m => m.remove());
+  const target = btn.dataset.target;  // read now: the poll may replace the button
+  closePickMenus();
   const menu = document.createElement("div");
-  menu.className = "model-menu" + (spec.foot ? " at-foot" : "");
+  menu.className = "model-menu";
   menu.innerHTML = spec.items()
     .map(([label, id]) => `<button data-pick="${esc(id)}">${esc(label)}</button>`).join("");
-  btn.closest(".card").appendChild(menu);
+  // In <body> so no ancestor's overflow or stacking context can crop it.
+  document.body.appendChild(menu);
+  placeMenu(menu, btn);
   menu.addEventListener("click", async e => {
     e.stopPropagation();
     const b = e.target.closest("button[data-pick]");
@@ -1991,11 +2083,38 @@ function openPickMenu(btn, kind) {
     b.textContent = "…";
     const pick = b.dataset.pick;
     menu.remove();
-    await spec.apply(btn.dataset.target, pick);
+    await spec.apply(target, pick);
   });
-  // close on the next outside click (deferred so this very click doesn't count)
-  setTimeout(() => document.addEventListener("click",
-    () => menu.remove(), {once: true}), 0);
+  // close on the next outside click (deferred so this very click doesn't count),
+  // and on anything that would leave it stranded away from its button
+  setTimeout(() => document.addEventListener("click", closePickMenus, {once: true}), 0);
+  addEventListener("scroll", closePickMenus, {once: true, capture: true});
+  addEventListener("resize", closePickMenus, {once: true});
+}
+
+function closePickMenus() {
+  document.querySelectorAll(".model-menu").forEach(m => m.remove());
+}
+
+/* Bring a headstone back: a fresh agent in the same folder, resuming that
+   conversation (`claude --resume <sid>`). The new session gets its own id, so
+   the old headstone stays where it is — this hatches a descendant, it does not
+   reanimate the corpse. */
+async function reviveAgent(btn) {
+  const sid = btn.dataset.sid, cwd = btn.dataset.cwd;
+  if (!cwd) { toast("That session's folder is unknown, so it can't be resumed.", true); return; }
+  btn.textContent = "reviving…";
+  btn.disabled = true;
+  const r = await post("/api/spawn", {cwd, resume: sid, prompt: "", name: ""});
+  if (r.ok) {
+    closeModal();
+    toast(`Resumed in ${cwd} — the new pet appears in a moment.`);
+    tick();
+  } else {
+    btn.disabled = false;
+    btn.textContent = "↑ Resurrect";
+    toast(`Couldn't resume: ${r.msg}`, true);
+  }
 }
 
 /* The armed "Confirm kill?" state used to live on the button element itself.
@@ -2063,6 +2182,12 @@ document.body.addEventListener("click", e => {
   if (e.target.closest(".rename-btn")) {
     e.stopPropagation();
     startRename();
+    return;
+  }
+  const rev = e.target.closest(".revive-btn");
+  if (rev) {
+    e.stopPropagation();
+    reviveAgent(rev);
     return;
   }
   const mp = e.target.closest(".model-tag");

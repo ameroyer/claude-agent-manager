@@ -162,6 +162,16 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       488k tokens", the sub-agent roster) sit below it, so scan the last few lines upward.</li>
   <li><strong>The composer is not the last line either</strong> — it is the bottom-most
       <code>❯</code> line. Past user turns use the same marker.</li>
+  <li><strong>The context window cannot be read off the model name.</strong> Two sessions both
+      reporting <code>claude-opus-5</code> were observed with peak prompts of 170k and 822k, and
+      nothing on the machine declares which window either is on — not the transcript (no beta
+      field), not <code>~/.claude/sessions/&lt;pid&gt;.json</code>, not <code>~/.claude.json</code>.
+      The only evidence is behavioural, so <code>_ctx_peak</code> tracks the largest prompt each
+      session has been seen holding: a prompt past 200k could not have fit a 200k window. It must
+      be the <em>peak</em>, not the current size — inferring from the current one would halve the
+      window right after a compaction and make the percentage jump upward. Percentages are
+      therefore not comparable between sessions, and anything showing one must show its
+      denominator.</li>
   <li><strong>Transcript mtime is not activity.</strong> Claude Code rewrites untimestamped
       bookkeeping records; sort on the newest <em>timestamped</em> record instead.</li>
   <li><strong>A Task sub-agent's <code>tool_use</code> is only written once it finishes.</strong>
@@ -212,13 +222,19 @@ piece of DOM state inside it — scroll positions, open <code>&lt;details&gt;</c
 selection, the caret. So:</p>
 <ul>
   <li>compare the markup first and <strong>skip the write entirely</strong> when nothing changed
-      (<code>lastBodyHtml</code>, <code>lastGridHtml</code>);</li>
+      (<code>lastBodyHtml</code>), and compare it <em>per element</em> for anything repeated —
+      one string for a whole list is always different, so the guard never fires
+      (<code>lastGridParts</code>);</li>
   <li>never rebuild a container while it holds the focus or a live selection;</li>
   <li>update results in place rather than re-rendering controls the user is typing into;</li>
   <li>keep exactly one scroll container per view — a scrollable box nested in a scrollable
       panel traps the wheel and loses its position;</li>
   <li>hold transient UI state (an armed Kill button) in JS, never on the element, or the next
-      rebuild wipes it.</li>
+      rebuild wipes it;</li>
+  <li>position a popup from its <em>trigger's</em> rect (<code>placeMenu</code>: fixed, in
+      <code>&lt;body&gt;</code>, flipped up when there is no room below, clamped to the
+      viewport) — offsets relative to whatever container it lands in are tuned for one call
+      site and silently wrong at the next.</li>
 </ul>
 
 <h2>Motion</h2>
@@ -229,10 +245,20 @@ selection, the caret. So:</p>
       by the mood pill, the badge, the border and the context gauge.</li>
   <li><strong>Pausing an animation on hover is worse than the animation.</strong> It snaps the
       element from wherever the timeline had it back to zero, the instant the cursor arrives.</li>
-  <li><strong>Sliding an element on <code>:hover</code> can flicker.</strong> The shift moves it
-      out from under a cursor near its trailing edge, hover drops, it slides back, and it
-      oscillates. The fix is a negative-<code>z-index</code> <code>::before</code> pad inset past
-      the shift, sized under half the grid gap so neighbours never overlap.</li>
+  <li><strong>The worst motion bug had nothing to do with CSS.</strong> The shelf was written as
+      one <code>grid.innerHTML = everything</code>, guarded by comparing the whole string —
+      which, measured against a live board, differs on <em>100% of polls</em> (one card's "5s
+      ago" ticking over is enough). So every card element was destroyed and recreated 1.7 times
+      a second. A card under the cursor was reborn with <code>transform: none</code>, matched
+      <code>:hover</code> immediately, and slid 0 → -2px <em>again</em>, forever. It looked
+      exactly like a broken keyframe, and no amount of editing keyframes touched it.
+      <code>paintGrid</code> now writes one slot at a time, skips anything under the pointer,
+      and defers a reshuffle while a card is hovered. <strong>Measure DOM writes before
+      theorising about animation.</strong></li>
+  <li><strong>Sliding an element on <code>:hover</code> can also flicker.</strong> The shift
+      moves it out from under a cursor near its trailing edge, hover drops, it slides back, and
+      it oscillates. The fix is a negative-<code>z-index</code> <code>::before</code> pad inset
+      past the shift, sized under half the grid gap so neighbours never overlap.</li>
   <li>Only <code>pulse</code> (a smooth opacity breathe), the one-shot <code>fade-up</code>, and
       the deliberate walking loader remain.</li>
 </ul>
