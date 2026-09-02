@@ -27,7 +27,9 @@
   <div class="spawn-dialog" role="dialog" aria-modal="true">
     <div class="spawn-title">New agent</div>
     <label class="spawn-label">Working directory</label>
-    <input id="spawn-cwd" class="spawn-input" type="text" placeholder="~/projects/…">
+    <input id="spawn-cwd" class="spawn-input" type="text" list="spawn-cwd-suggest"
+           data-dirs="1" spellcheck="false" placeholder="~/projects/… — type to complete">
+    <datalist id="spawn-cwd-suggest"></datalist>
     <label class="spawn-label">Session <span class="dim">(fresh, or resume a past conversation from this folder)</span></label>
     <select id="spawn-resume" class="spawn-input"><option value="">start a fresh session</option></select>
     <label class="spawn-label">tmux session name <span class="dim">(optional — defaults to the folder name)</span></label>

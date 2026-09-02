@@ -196,7 +196,11 @@ main {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(370px, 100%), 1fr));
   gap: 15px;
-  align-items: start;
+  /* Cards fill their row rather than each taking its own height. Content
+     genuinely differs — a launched session carries an extra "from ↳ parent"
+     line, an approval carries buttons — so left to themselves the shelf came
+     out ragged, and neighbouring pets looked like different sizes of card. */
+  align-items: stretch;
   animation: fade-up .4s ease both;
 }
 @keyframes fade-up { from { opacity: 0; transform: translateY(6px); } }
@@ -306,7 +310,7 @@ main {
 .mode-hint { margin-top: 8px; font: 11.5px var(--mono); color: var(--muted); font-weight: 400; }
 
 /* approval, shown as the last entry of the conversation */
-.msg.approval { align-self: flex-start; max-width: 92%; }
+.msg.approval { max-width: 92%; }
 .msg.approval .msg-meta { color: var(--critical); }
 .msg.approval .msg-text {
   background: var(--surface-2);
@@ -708,9 +712,22 @@ main {
   font: 700 9.5px var(--mono); text-transform: uppercase; letter-spacing: .08em;
   color: var(--muted); white-space: nowrap; padding-bottom: 5px;
 }
-.msg { max-width: 82%; min-width: 0; }
-.msg.user { align-self: flex-end; }
-.msg.assistant { align-self: flex-start; }
+/* Each turn is an avatar beside a bubble: the pet for the agent, your identicon
+   for you. One row, reversed for your own messages, so the two sides face each
+   other across the thread. */
+.msg { max-width: 82%; min-width: 0; display: flex; align-items: flex-end; gap: 8px; }
+.msg.user { align-self: flex-end; flex-direction: row-reverse; }
+.msg.assistant, .msg.approval { align-self: flex-start; }
+.msg-col { min-width: 0; flex: 1; }
+.avatar, .avatar-pet {
+  flex-shrink: 0; width: 26px; height: 26px; display: block; margin-bottom: 2px;
+}
+.avatar-pet { display: flex; align-items: flex-end; justify-content: center; overflow: visible; }
+/* .mascot is 84px at equal specificity later in the file, so this needs both
+   classes to win — the same trap the legend pets hit. */
+.mascot.chat-pet { width: 34px; height: 26px; }
+.pet-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+.user-avatar { border-radius: 6px; background: var(--surface-3); padding: 2px; }
 .msg-meta { font: 11px var(--mono); color: var(--muted); margin: 0 4px 4px; display: flex; gap: 8px; align-items: center; }
 .msg.user .msg-meta { justify-content: flex-end; }
 /* per-message copy button — visible on hover, always reachable by keyboard */
@@ -853,6 +870,12 @@ main {
 .card.tama {
   --pet-accent: #f4c95d;
   --card-tint: var(--shell);
+  /* A column, so the slack a stretched card gains lands above the foot rather
+     than between the screen and the lamps — the foot row then lines up across
+     the shelf. None of the children carry collapsing margins, so the spacing
+     is unchanged. */
+  display: flex;
+  flex-direction: column;
   padding: 12px 12px 10px;
   border-radius: 18px;
   /* the shell wears a muted wash of the pet's model colour, so a glance across
@@ -882,7 +905,6 @@ main {
 .card.tama.needs_input { border-color: var(--critical);
   box-shadow: 5px 5px 0 color-mix(in srgb, var(--critical) 45%, transparent); }
 .card.tama.idle { opacity: .88; }
-.card.tama.child { background: color-mix(in srgb, var(--card-tint) 18%, var(--shell)); }
 
 /* ---- LCD ---- */
 .tama-screen {
@@ -1023,15 +1045,6 @@ button.model-tag:hover { background: var(--lcd); }
 .mood-pill.needs_input { background: #ffdce6; color: #8e1140; }
 .mood-pill.waiting { background: #ffedc0; color: #6e5200; }
 
-/* a session another agent (or the dashboard) launched — deliberately quieter
-   than a top-level agent, so the shelf reads parent-first */
-.card.child {
-  background: var(--surface-2);
-  box-shadow: none;
-  border-style: dashed;
-}
-.card.child .tama-screen { filter: saturate(.8); }
-
 /* Every chrome button acknowledges its own press. Without it, a click whose
    effect takes a round trip through tmux reads as though nothing happened —
    which is most of what "the UI feels finnicky" was. Card-internal buttons are
@@ -1135,7 +1148,7 @@ button.model-tag:hover { background: var(--lcd); }
 }
 .shell-meta .sid { color: var(--shell-ink); opacity: .8; }
 
-.tama-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.tama-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 8px; }
 .tama-foot .mode-chip, .tama-foot .tmux-tag {
   font: 600 10px var(--mono);
   color: var(--shell-ink-dim);

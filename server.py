@@ -148,31 +148,78 @@ def pid_alive(pid):
     return os.path.exists(f"/proc/{pid}")
 
 
+# How far up a process's ancestry to look for its pane. A pane's shell, an
+# `srun`, a wrapper script — a handful of hops, never a long chain.
+PANE_WALK_MAX = 12
+
+
+def claude_pids():
+    """Our own processes whose comm is exactly `claude`, read from /proc.
+
+    The uid is checked first because it is one stat against an open-read-close,
+    and on a shared login box most processes belong to other people — 5% of
+    2,500 were ours, which turned a 26 ms scan into 8 ms. Everything downstream
+    already discarded other users' processes; this only rejects them sooner."""
+    uid = os.getuid()
+    out = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return out
+    for d in entries:
+        if not d.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{d}").st_uid != uid:
+                continue
+        except OSError:
+            continue
+        if proc_comm(int(d)) == "claude":
+            out.append(int(d))
+    return out
+
+
+def proc_ppid(pid):
+    """Parent pid from field 4 of /proc/<pid>/stat, or None."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def tmux_pane_index():
-    """Map every descendant pid of each tmux pane to its pane target."""
-    panes = []
+    """Map each Claude process — and each pane's own root process — to its pane.
+
+    Those are the only pids anything asks about, so this walks *up* from them
+    instead of expanding every pane's descendants. The downward walk needed the
+    whole process table, and `ps -eo pid=,ppid=` was 50 ms of a 67 ms board
+    build on a machine with 2,500 processes: a 2,500-entry tree built to answer
+    a question about a dozen. Reading /proc directly also drops a subprocess."""
+    panes = {}
     out = run(["tmux", "list-panes", "-a", "-F",
                "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{window_name}"])
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) == 5:
             sess, win, pane, ppid, wname = parts
-            panes.append({"target": f"{sess}:{win}.{pane}", "session": sess,
-                          "window": wname, "pid": int(ppid)})
-    children = {}
-    for line in run(["ps", "-eo", "pid=,ppid="]).splitlines():
-        try:
-            pid, ppid = map(int, line.split())
-            children.setdefault(ppid, []).append(pid)
-        except ValueError:
-            continue
-    pid_to_pane = {}
-    for p in panes:
-        stack = [p["pid"]]
-        while stack:
-            pid = stack.pop()
-            pid_to_pane[pid] = p
-            stack.extend(children.get(pid, []))
+            try:
+                root = int(ppid)
+            except ValueError:
+                continue
+            panes[root] = {"target": f"{sess}:{win}.{pane}", "session": sess,
+                           "window": wname, "pid": root}
+    pid_to_pane = dict(panes)  # a pane's own process belongs to it
+    for pid in claude_pids():
+        p = pid
+        for _ in range(PANE_WALK_MAX):
+            pane = panes.get(p)
+            if pane is not None:
+                pid_to_pane[pid] = pane
+                break
+            p = proc_ppid(p)
+            if not p or p <= 1:
+                break
     return pid_to_pane
 
 
@@ -582,9 +629,14 @@ def list_history(limit=HISTORY_MAX):
     this walks every project directory, so it lives behind its own endpoint and
     its own TTL."""
     now = time.time()
-    if now - _history_cache["t"] < HISTORY_TTL:
-        return _history_cache["rows"]
     live = {a["sessionId"] for a in cached_state()["agents"]}
+    if now - _history_cache["t"] < HISTORY_TTL:
+        # Re-check the cached rows against the live board rather than trusting
+        # the snapshot: `claude --resume` reuses the session id, and a session
+        # resumed just after this was built would keep a headstone for the whole
+        # TTL. Rebuilding here is far too expensive; filtering it is free.
+        return [r for r in _history_cache["rows"]
+                if r and r.get("sessionId") not in live]
     renames = load_names()  # not `names`: the loop below uses that for listdir
     lineage = load_spawn_log()["lineage"]
     files = []
@@ -765,32 +817,47 @@ def list_artifacts(cwd, session_id):
     return files[:ART_MAX_FILES]
 
 
-def browse_paths(prefix):
-    """Completions for the artifact picker: sub-directories and .md/.txt files
-    matching what has been typed so far.
+def browse_paths(prefix, dirs_only=False, base_dir=None):
+    """Path completions: sub-directories, plus .md/.txt files unless `dirs_only`.
+
+    A relative prefix resolves against `base_dir` when one is given — that is
+    what makes the artifact box complete inside the *agent's* folder rather than
+    against whatever directory the server happens to have been started in.
 
     Read-only and listing-only, and it widens nothing: pin_artifact already
     accepts any path, so anything listed here was already reachable. Hidden
     entries stay hidden unless explicitly typed."""
     prefix = os.path.expanduser(prefix or "")
+    if (base_dir and not os.path.isabs(prefix)
+            and os.path.isdir(base_dir)):
+        prefix = os.path.join(base_dir, prefix)
     ends_in_sep = prefix.endswith(os.sep)
     base = (prefix if ends_in_sep else os.path.dirname(prefix)) or "."
     head = "" if ends_in_sep else os.path.basename(prefix)
+    lo = head.lower()
     try:
-        names = sorted(os.listdir(base))
+        names = os.listdir(base)
     except OSError:
         return []
+    # Narrow by name first, in one comprehension, and only then sort: a
+    # 20k-entry directory typed down to a few letters sorts a handful of names
+    # instead of all of them. The classification below is what costs a stat
+    # each, so it runs on at most BROWSE_MAX survivors, never on the directory.
+    if lo:
+        names = [n for n in names if n.lower().startswith(lo)]
+    if not head.startswith("."):
+        names = [n for n in names if not n.startswith(".")]
+    names.sort()
     out = []
     for n in names:
-        if n.startswith(".") and not head.startswith("."):
-            continue
-        if head and not n.lower().startswith(head.lower()):
-            continue
         full = os.path.join(base, n)
-        if os.path.isdir(full):
-            out.append(full + os.sep)
-        elif n.lower().endswith(ART_EXTS):
-            out.append(full)
+        try:
+            if os.path.isdir(full):
+                out.append(full + os.sep)
+            elif not dirs_only and n.lower().endswith(ART_EXTS):
+                out.append(full)
+        except OSError:
+            continue  # a broken symlink shouldn't end the listing
         if len(out) >= BROWSE_MAX:
             break
     return out
@@ -1133,6 +1200,10 @@ def newest_session_id(cwd, since=0):
     return best[1][:-len(".jsonl")] if best else None
 
 
+# pid -> the session id it was last seen owning, so an agent's identity cannot
+# flap back to a placeholder. Pruned with the other caches in build_state.
+_sid_by_pid = {}
+
 REMOTE_FRESH_SECONDS = 300
 
 
@@ -1191,17 +1262,25 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
         except OSError:
             continue
         started = proc_start_time(pid) or st.st_mtime
-        sid = newest_session_id(cwd, since=started)
+        # Once a pid has been pinned to a real session id, keep it there. The
+        # id is otherwise re-guessed from the newest transcript every poll, and
+        # a momentary miss would hand a running agent back its "new-<pid>"
+        # placeholder — the card changes identity, which reads as the agent
+        # dying and a stranger taking its place.
+        sid = newest_session_id(cwd, since=started) or _sid_by_pid.get(pid)
         if sid in seen_sids:
             continue
         recent = False
         if sid:
+            _sid_by_pid[pid] = sid
             try:
                 recent = time.time() - os.path.getmtime(transcript_path(cwd, sid)) < 8
             except OSError:
                 pass
         else:
-            sid = f"new-{pid}"  # fresh conversation: no transcript on disk yet
+            # No transcript newer than this process: either a brand-new
+            # conversation, or a `--resume` that hasn't written yet.
+            sid = f"new-{pid}"
         seen_sids.add(sid)
         out.append({"pid": pid, "sessionId": sid, "cwd": cwd,
                     "status": "busy" if recent else "idle",
@@ -1388,8 +1467,10 @@ def link_spawns(agents):
 
     tmux daemonises, so a spawned session's process parent is the tmux server,
     not the agent that ran the command — /proc genuinely cannot answer this.
-    Two sources that can: the parent's own transcript, which recorded the
-    `tmux new-session` it ran, and the dashboard's own spawn log."""
+    The one source that can is the parent's own transcript, which recorded the
+    `tmux new-session` it ran. Only a real agent counts as a parent: sessions
+    started from this dashboard used to be attributed to "dashboard", which is
+    not one."""
     by_session = {}
     for a in agents:
         if a["tmux"]:
@@ -1405,23 +1486,19 @@ def link_spawns(agents):
                 a["spawns"].append(child["display_name"] or child["name"])
                 record_lineage(child["sessionId"], a["sessionId"],
                                a["display_name"] or a["name"])
-    log = load_spawn_log()
-    for a in agents:
-        if not a["spawned_by"] and a["tmux"] and a["tmux"]["session"] in log["tmux"]:
-            a["spawned_by"] = "dashboard"
     return agents
 
 
 def load_spawn_log():
-    """{"tmux": {session name: origin}, "lineage": {child sid: {...}}}.
+    """{"lineage": {child sid: {parent sid, parent name}}}.
 
-    Tolerates the older flat shape, which was only the tmux map."""
+    Tolerates the two older shapes: a bare tmux map, and one with a "tmux" key
+    alongside. That map recorded which tmux *session names* the dashboard had
+    created, and every agent in one was labelled as launched by "dashboard" —
+    which is not a parent, and, because tmux session names are reused, stuck to
+    whatever unrelated agent later took the name. It is no longer read."""
     cfg = read_json(SPAWNS_FILE) or {}
-    if "tmux" in cfg or "lineage" in cfg:
-        cfg.setdefault("tmux", {})
-        cfg.setdefault("lineage", {})
-        return cfg
-    return {"tmux": cfg, "lineage": {}}
+    return {"lineage": cfg.get("lineage", {}) if ("tmux" in cfg or "lineage" in cfg) else {}}
 
 
 def save_spawn_log(cfg):
@@ -1446,16 +1523,6 @@ def record_lineage(child_sid, parent_sid, parent_name):
     cfg["lineage"][child_sid] = {"parent": parent_sid, "name": parent_name}
     if len(cfg["lineage"]) > 500:  # keep the file bounded
         cfg["lineage"] = dict(list(cfg["lineage"].items())[-500:])
-    save_spawn_log(cfg)
-
-
-def record_spawn(session_name):
-    """Remember that the dashboard created this tmux session, so its card can
-    say so. Pruned to sessions that still exist on every write."""
-    live = set(run(["tmux", "list-sessions", "-F", "#{session_name}"]).split())
-    cfg = load_spawn_log()
-    cfg["tmux"] = {k: v for k, v in cfg["tmux"].items() if k in live}
-    cfg["tmux"][session_name] = "dashboard"
     save_spawn_log(cfg)
 
 
@@ -1493,13 +1560,18 @@ def build_state():
     # conversations use the same caches, and evicting them every second made
     # opening one re-read its transcript on every poll.
     for cache, cap in ((_tail_cache, 200), (_chat_cache, 60), (_mcp_state_cache, 200),
-                       (_git_cache, 200), (_history_row_cache, 500), (_ctx_peak, 200)):
+                       (_git_cache, 200), (_history_row_cache, 500), (_ctx_peak, 200),
+                       (_sid_by_pid, 200)):
         if len(cache) > cap:
             cache.clear()
     spawn_dir = os.path.join(HOME, "projects")
     if not os.path.isdir(spawn_dir):
         spawn_dir = HOME
+    # Whose dashboard this is, for the avatar beside your own messages. The
+    # account name only — it is already all over the payload inside every cwd,
+    # so it adds nothing that wasn't there, and nothing is sent anywhere.
     return {"agents": agents, "generated_at": time.time(),
+            "user": os.environ.get("USER") or os.path.basename(HOME) or "you",
             "spawn_dir": spawn_dir + "/"}
 
 
@@ -1775,12 +1847,19 @@ def needs_confirm(target, before, key, timeout=1.0):
     return parked
 
 
-def kill_session(session_id):
+def kill_session(session_id, pid=None):
     """Terminate a tracked agent. Claude Code catches SIGTERM, so kill the tmux
     pane it runs in (removes the pane + SIGHUPs its processes) and SIGKILL the
-    process as a backstop."""
-    agent = next((a for a in cached_state()["agents"]
-                  if a["sessionId"] == session_id), None)
+    process as a backstop.
+
+    The pid disambiguates: two processes can share a session id (someone ran
+    `claude --resume` on a conversation that was already open), and picking the
+    first match by id alone could kill the other one."""
+    agents = cached_state()["agents"]
+    agent = next((a for a in agents
+                  if a["sessionId"] == session_id and (pid is None or a["pid"] == pid)), None)
+    if agent is None and pid is not None:  # the board moved on; fall back to the id
+        agent = next((a for a in agents if a["sessionId"] == session_id), None)
     if not agent:
         return False, "unknown session"
     pid = agent["pid"]
@@ -1824,7 +1903,16 @@ def kill_session(session_id):
     except OSError:
         pass
     _cache["t"] = 0.0  # force a fresh state on next poll
+    _history_cache["t"] = 0.0  # ...and let it take its place in the cemetery now
     return True, killed
+
+
+# Exactly what Claude Code prints instead of starting, taken from its binary.
+# It must be this specific: a looser rule ("command not found", "Error:") also
+# matched the noise a login shell prints into every new pane, which would have
+# torn down perfectly good sessions.
+_LAUNCH_FAILED_RE = re.compile(r"No conversation found (?:with session ID|to continue)")
+RESUME_CHECK_SECONDS = 6
 
 
 def spawn_session(cwd, prompt, name=None, resume=None):
@@ -1836,6 +1924,12 @@ def spawn_session(cwd, prompt, name=None, resume=None):
     if resume:
         if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", resume):
             return False, "bad session id"
+        # Resuming a conversation that is already open starts a SECOND process
+        # on the same session id and the same transcript. Both then appear on
+        # the board under one id, they interleave their writes, and a Kill —
+        # which finds an agent by session id — could hit either of them.
+        if any(a["sessionId"] == resume for a in cached_state()["agents"]):
+            return False, "that conversation is already running"
         launch = f"claude --resume {resume}"
     requested = re.sub(r"[^A-Za-z0-9_-]", "-", (name or "").strip()).strip("-")
     base = requested or re.sub(r"[^A-Za-z0-9_-]",
@@ -1865,7 +1959,26 @@ def spawn_session(cwd, prompt, name=None, resume=None):
                            timeout=5, check=True)
     except Exception as e:
         return False, str(e)
-    record_spawn(name)
+    # tmux succeeding says nothing about Claude. If a --resume can't be honoured
+    # it prints why and exits at once, leaving a brand-new tmux session sitting
+    # at a shell prompt and no agent on the board — which looked exactly like
+    # "I resurrected it and it never came back". Watch until its UI is up, or
+    # until it says why it gave up, and don't leave the empty session behind.
+    if resume:
+        why = []
+        def settled():
+            lines = pane_lines(pane)
+            why[:] = [ln.strip() for ln in lines if _LAUNCH_FAILED_RE.search(ln)]
+            return bool(why) or footer_mode(lines) is not None
+        wait_until(settled, RESUME_CHECK_SECONDS)
+        if why:
+            subprocess.run(["tmux", "kill-session", "-t", name],
+                           capture_output=True, timeout=5)
+            return False, why[0][:120]
+    _cache["t"] = 0.0
+    # A resumed session keeps its id, so its headstone has to be withdrawn now
+    # rather than at the end of the history TTL.
+    _history_cache["t"] = 0.0
     return True, name
 
 
@@ -1917,7 +2030,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if route == "/api/browse":
                 q = parse_qs(urlparse(self.path).query)
-                self._send(200, {"paths": browse_paths(q.get("path", [""])[0])})
+                self._send(200, {"paths": browse_paths(
+                    q.get("path", [""])[0],
+                    dirs_only=q.get("dirs", [""])[0] == "1",
+                    base_dir=q.get("base", [""])[0] or None)})
                 return
             if route == "/api/sessions":
                 cwd = parse_qs(urlparse(self.path).query).get("cwd", [""])[0]
@@ -1961,7 +2077,8 @@ class Handler(BaseHTTPRequestHandler):
                                                     b.get("text", "")),
                    "/api/key": lambda b: send_key(b.get("target", ""),
                                                   b.get("key", "")),
-                   "/api/kill": lambda b: kill_session(b.get("sid", "")),
+                   "/api/kill": lambda b: kill_session(b.get("sid", ""),
+                                                     b.get("pid")),
                    "/api/rename": lambda b: set_name(b.get("sid", ""),
                                                      b.get("name", "")),
                    "/api/model": lambda b: set_model(b.get("target", ""),

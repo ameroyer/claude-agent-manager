@@ -4,6 +4,7 @@ const conn = document.getElementById("conn");
 const overlay = document.getElementById("modal-overlay");
 const modal = document.getElementById("modal");
 let openSid = null;
+let openPid = null;  // the open card's process, so it survives a session-id swap
 let agents = [];
 let editingName = false;  // pause head re-render while the rename input is open
 let lastPayload = "";
@@ -16,13 +17,19 @@ let killArmed = null;  // sessionId whose Kill button is showing "Confirm kill?"
    arriving between the two threw the click away — which is why cards and the ✕
    sometimes needed pressing twice. Nothing is rebuilt while a button is held. */
 let pointerHeld = false;
-document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+/* Where the press began. A click's target is the nearest common ancestor of
+   press and release, so dragging a selection out of the conversation reports
+   the backdrop — indistinguishable from clicking the backdrop unless you
+   remember where the gesture started. */
+let pressStart = null;
+document.addEventListener("pointerdown", e => { pointerHeld = true; pressStart = e.target; }, true);
 for (const ev of ["pointerup", "pointercancel"])
   document.addEventListener(ev, () => { pointerHeld = false; }, true);
 // Releasing the button outside the window fires no pointerup here, and the
 // board would then be frozen until the next click.
 addEventListener("blur", () => { pointerHeld = false; });
 let spawnDir = "~/";  // server expands ~; refined from /api/state
+let me = "you";       // the account this dashboard belongs to, for your avatar
 /* Past conversations — sessions that are no longer running. Fetched from its
    own endpoint on a slow timer, never from the 1s board poll: building it walks
    every project directory. */
@@ -463,7 +470,11 @@ const ITEM = {
 const ITEM_HALO = Object.fromEntries(
   Object.entries(ITEM).map(([name, cells]) => [name, haloOf(cells)]));
 
-function mascotSvg(a, cls = "", opts = {}) {
+const PET_VIEWBOX = "-1 -1 21 15.4";
+
+/* The sprite's pixels, without the <svg> around them — so one pet can be
+   defined once and referenced many times (see petDefsHtml). */
+function mascotRects(a, opts = {}) {
   const c = critterOf(a);
   const {hat, item, accent} = c;
   const skin = opts.skin || c.skin;
@@ -487,9 +498,30 @@ function mascotSvg(a, cls = "", opts = {}) {
       (ITEM[item] || []).forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
     }
   }
+  return px.join("");
+}
+
+function mascotSvg(a, cls = "", opts = {}) {
   return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${cls}"
-    viewBox="-1 -1 21 15.4" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
-    aria-hidden="true">${px.join("")}</svg>`;
+    viewBox="${PET_VIEWBOX}" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
+    aria-hidden="true">${mascotRects(a, opts)}</svg>`;
+}
+
+/* One pet drawn ~200 <rect>s deep is fine on a card. Repeating it beside every
+   message in a conversation was not: a 150-message Exchange came to 7,773 rects
+   and 625 KB of markup, which the browser re-parsed on every render — that is
+   what made opening and leaving the tab feel slow. The sprite is now defined
+   once per conversation and each message references it, so the cost is paid a
+   single time. (The user identicon is ~13 rects, so it is left inline.) */
+function petDefsHtml(a) {
+  return `<svg class="pet-defs" aria-hidden="true" width="0" height="0"
+    ><symbol id="pet-${esc(a.sessionId)}" viewBox="${PET_VIEWBOX}"
+      >${mascotRects(a, {hideItem: true})}</symbol></svg>`;
+}
+
+function petUseHtml(a) {
+  return `<svg class="mascot chat-pet" shape-rendering="crispEdges" aria-hidden="true"
+    ><use href="#pet-${esc(a.sessionId)}"/></svg>`;
 }
 
 const LEGEND_SKIN = {body: "#cfc9d6", outline: "#9a94a3"};
@@ -949,7 +981,12 @@ function cardHtml(a) {
     : a.current_task ? `▶ ${a.current_task}`
     : summaryLine(a) || STATE_LABEL[a.state] || a.state;
 
-  return `<div class="card tama ${esc(a.state)}${a.spawned_by ? " child" : ""}" data-sid="${esc(a.sessionId)}"
+  // Every pet gets the same shell. A launched session used to be drawn quieter
+  // — dashed border, no drop shadow, paler tint, desaturated screen — which
+  // made the shelf look like two kinds of card rather than one. Who launched it
+  // is said in words on the card ("from ↳ parent", with the parent's pet), so
+  // nothing is lost by letting them all look alike.
+  return `<div class="card tama ${esc(a.state)}" data-sid="${esc(a.sessionId)}"
     style="--pet-accent:${accent};--card-tint:${accent}">
     <div class="tama-screen">
       <div class="tama-top">
@@ -1035,7 +1072,17 @@ function graveRepoOf(a) {
   return (a.git && a.git.repo) || a.project || a.cwd || "";
 }
 
+/* `claude --resume` continues the *same* session id and writes to the same
+   transcript, so a resurrected agent IS the session its headstone was cut for.
+   The server does exclude live sessions from /api/history, but that list is
+   cached for 30s and refetched every 60s — for up to a minute and a half a
+   running agent still had a grave, and clicking it looked like it had died.
+   Checked against the live board on every render instead, which makes the
+   overlap impossible rather than merely brief. */
+const isPast = a => !agents.some(x => x.sessionId === a.sessionId);
+
 function graveMatches(a) {
+  if (!isPast(a)) return false;
   const f = graveFilter;
   if (f.model && modelFamily((a.context_breakdown || {}).model) !== f.model) return false;
   if (f.repo && graveRepoOf(a) !== f.repo) return false;
@@ -1081,7 +1128,7 @@ function refreshGraveResults() {
   gridEl.innerHTML = graveFamilies(shown).map(graveFamilyHtml).join("")
     || '<div class="empty">Nothing matches that filter.</div>';
   const count = grid.querySelector(".grave-count");
-  if (count) count.textContent = `${shown.length} of ${history.length}`;
+  if (count) count.textContent = `${shown.length} of ${history.filter(isPast).length}`;
 }
 
 function graveFilterHtml(shown, total) {
@@ -1159,8 +1206,8 @@ const TABS = [
   {id: "graph", label: "Work graph", show: a => !a.dead && !!agentGraph(a)},
   {id: "exchange", label: "Exchange",
    show: a => a.dead || a.last_prompt || a.last_assistant || a.state === "needs_input"},
-  {id: "mcp", label: "MCP", show: a => !a.dead && (a.mcp || []).length > 0},
   {id: "artifacts", label: "Artifacts", show: a => !a.dead},
+  {id: "mcp", label: "MCP", show: a => !a.dead && (a.mcp || []).length > 0},
 ];
 
 function tabbarHtml(a) {
@@ -1178,18 +1225,70 @@ function toolLine(m) {
   </div>`;
 }
 
-function chatBubble(role, text, who, ts, thinking, pending) {
+/* A deterministic identicon for the human in the conversation.
+
+   Drawn here rather than fetched: Gravatar would mean an outbound request on
+   every render and would hand your email to a third party, and this dashboard
+   ships no external assets and works offline. A classic 5×5 grid mirrored down
+   the middle, so it reads as a glyph rather than noise at 26px, in inks chosen
+   to sit apart from the pets' pastels — you should never be mistaken for one of
+   your own agents. */
+const AVATAR_INKS = ["#4f6fbf", "#3d8a72", "#a2603f", "#7f57a6",
+                     "#b5566a", "#4c7a3c", "#a67c2f", "#47687f"];
+function userAvatarSvg(name, cls = "") {
+  const seed = String(name || "you");
+  // hashStr is FNV-1a, whose lowest bit is only the parity of the input
+  // characters — `hash(seed + x + y) & 1` therefore alternates with the
+  // coordinates and drew the identical checkerboard for every name. Seed a
+  // xorshift instead and take whole words from it.
+  let r = hashStr(seed) || 1;
+  const next = () => {
+    r ^= r << 13; r >>>= 0;
+    r ^= r >>> 17;
+    r ^= r << 5; r >>>= 0;
+    return r;
+  };
+  const ink = AVATAR_INKS[next() % AVATAR_INKS.length];
+  // Fixed density: score the 15 independent cells and take the densest 8.
+  // Rolling each cell independently left some names with three lit pixels,
+  // which reads as scattered dots rather than a glyph.
+  const cells = [];
+  for (let x = 0; x < 3; x++) for (let y = 0; y < 5; y++) cells.push([next(), x, y]);
+  cells.sort((p, q) => q[0] - p[0]);
+  const px = [];
+  for (const [, x, y] of cells.slice(0, 8)) {
+    px.push([x, y]);
+    if (x < 2) px.push([4 - x, y]);  // mirrored, so it always reads centred
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="avatar user-avatar ${cls}"
+    viewBox="-0.5 -0.5 6 6" shape-rendering="crispEdges" aria-hidden="true">
+    ${px.map(([x, y]) => `<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${ink}"/>`).join("")}
+  </svg>`;
+}
+
+/* Who said it, beside what they said: the pet for the agent, your identicon for
+   you. `a` is the agent whose conversation this is; without it (an unattached
+   bubble) the row simply has no avatar. */
+function msgAvatarHtml(role, a) {
+  if (role === "user") return userAvatarSvg(me);
+  return a ? `<span class="avatar-pet">${petUseHtml(a)}</span>` : "";
+}
+
+function chatBubble(role, text, who, ts, thinking, pending, a) {
   const think = (role !== "user" && thinking)
     ? `<details class="think"><summary>Thinking</summary>
         <div class="think-body">${mdHtml(thinking)}</div></details>`
     : "";
   return `<div class="msg ${role === "user" ? "user" : "assistant"}${pending ? " pending" : ""}">
-    <div class="msg-meta">${esc(who)}${ts ? `<span>${msgTime(ts)}</span>` : ""}
-      ${pending ? `<span class="pending-tag">sending…</span>` : ""}
-      <button class="copy-btn" data-copy="${esc(text)}" title="Copy this message">⧉</button>
+    ${msgAvatarHtml(role, a)}
+    <div class="msg-col">
+      <div class="msg-meta">${esc(who)}${ts ? `<span>${msgTime(ts)}</span>` : ""}
+        ${pending ? `<span class="pending-tag">sending…</span>` : ""}
+        <button class="copy-btn" data-copy="${esc(text)}" title="Copy this message">⧉</button>
+      </div>
+      ${think}
+      <div class="msg-text">${mdHtml(text)}</div>
     </div>
-    ${think}
-    <div class="msg-text">${mdHtml(text)}</div>
   </div>`;
 }
 
@@ -1245,7 +1344,8 @@ function lastExchangeHtml(a) {
   if (!msgs.length && !working) return "";
   return `<div class="section">
     <div class="section-title">Last exchange</div>
-    <div class="chat">${renderChatEntries(a, withPending(a, msgs))}${working}</div></div>`;
+    <div class="chat">${petDefsHtml(a)}${
+      renderChatEntries(a, withPending(a, msgs))}${working}</div></div>`;
 }
 
 function summarySectionHtml(a) {
@@ -1319,9 +1419,16 @@ function graphTab(a) {
   </div>`;
 }
 
-let chat = {sid: null, messages: null};
+let chat = {sid: null, messages: null, error: null};
+/* The `last_activity` the open conversation was fetched for. The transcript of
+   a busy agent changes constantly, so refetching on every poll re-read its
+   tail (~24 ms of server work on a 4 MB transcript) and re-sent ~60 KB, 100
+   times a minute, to show the same messages. `last_activity` is already on the
+   board payload and only moves when a real message lands, so it decides. */
+let chatStamp = null;
 
 async function loadChat(sid) {
+  const stamp = (agents.find(x => x.sessionId === sid) || {}).last_activity ?? null;
   try {
     const res = await fetch(`/api/chat?sid=${encodeURIComponent(sid)}`,
       {headers: authHeaders()});
@@ -1329,7 +1436,13 @@ async function loadChat(sid) {
     if (openSid === sid) {
       const changed = !chat.messages || chat.sid !== sid ||
         JSON.stringify(chat.messages) !== JSON.stringify(d.messages);
-      chat = {sid, messages: d.messages || []};
+      // A refused request is not an empty conversation. Folding the two together
+      // made a stale server — one started before /api/chat learned to serve past
+      // sessions, and so answering 404 for every headstone — claim the
+      // transcript was empty, which sent the search in entirely the wrong place.
+      chat = {sid, messages: d.messages || [],
+              error: res.ok ? null : (d.error || `the server answered ${res.status}`)};
+      chatStamp = stamp;
       if (pending && pending.sid === sid) {
         const head = pending.text.trim().slice(0, 60);
         const landed = chat.messages.some(m => m.role === "user" && m.text.trim().startsWith(head));
@@ -1354,7 +1467,8 @@ function renderChatEntries(a, msgs) {
       return `<div class="chat-gap">… ${m.count} earlier step${m.count === 1 ? "" : "s"} — open Exchange for the full turn</div>`;
     }
     if (m.role === "tool") return toolLine(m);
-    return chatBubble(m.role, m.text, m.role === "user" ? "You" : name, m.ts, m.thinking, m.pending);
+    return chatBubble(m.role, m.text, m.role === "user" ? "You" : name,
+                      m.ts, m.thinking, m.pending, a);
   }).join("");
 }
 
@@ -1401,12 +1515,15 @@ function approvalPromptHtml(a) {
   const p = a.pending_tool;
   const q = (a.prompt && a.prompt.question) || a.notification || "Needs your approval";
   return `<div class="msg approval">
-    <div class="msg-meta">⚠ waiting on you</div>
-    <div class="msg-text">
-      <div class="approve-q">${esc(q)}</div>
-      ${p ? `<div class="approve-detail"><span class="tool-name">${esc(p.name)}</span>${
-        p.detail ? `<pre class="tool-cmd">${esc(p.detail)}</pre>` : ""}</div>` : ""}
-      ${approvalActionsHtml(a)}
+    ${msgAvatarHtml("assistant", a)}
+    <div class="msg-col">
+      <div class="msg-meta">⚠ waiting on you</div>
+      <div class="msg-text">
+        <div class="approve-q">${esc(q)}</div>
+        ${p ? `<div class="approve-detail"><span class="tool-name">${esc(p.name)}</span>${
+          p.detail ? `<pre class="tool-cmd">${esc(p.detail)}</pre>` : ""}</div>` : ""}
+        ${approvalActionsHtml(a)}
+      </div>
     </div>
   </div>`;
 }
@@ -1418,9 +1535,13 @@ function exchangeTab(a) {
   const approval = approvalPromptHtml(a);
   const working = workingStripHtml(a);
   if (!chat.messages.length && !approval && !working) {
-    return `<div class="section"><div class="chat-loading">No conversation found in the transcript tail.</div></div>`;
+    return `<div class="section"><div class="chat-loading">${chat.error
+      ? `Couldn't load this conversation — ${esc(chat.error)}.<br>
+         <small>If the server has been running a while, restart it: it holds
+         <code>server.py</code> as it was at launch.</small>`
+      : "No conversation found in the transcript tail."}</div></div>`;
   }
-  return `<div class="section"><div class="chat">${
+  return `<div class="section"><div class="chat">${petDefsHtml(a)}${
     renderChatEntries(a, withPending(a, chat.messages))}${approval}${working}</div></div>`;
 }
 
@@ -1479,22 +1600,34 @@ function fmtBytes(n) {
        : n >= 1e3 ? Math.round(n / 1e3) + " KB" : n + " B";
 }
 
-/* Completions for the pin box. Only re-queried when the directory part of what
-   you typed changes, so typing a filename doesn't hit the server per keystroke. */
-let browseDir = null;
+/* Path completion for any text input with a <datalist>, shared by the artifact
+   pin box and the spawn dialog's working directory.
 
-async function loadBrowse(value) {
+   Only re-queried when the *directory* part of what you typed changes: within
+   one directory the browser filters the existing options itself, so typing a
+   name costs no requests at all. The last directory is remembered per input, so
+   two boxes open at once cannot invalidate each other's list.
+
+   `dirs` restricts the answer to folders (the spawn dialog wants a directory,
+   never a file); `data-base` resolves a relative entry against the agent's own
+   folder instead of wherever the server was started. */
+const browsedDir = new WeakMap();
+
+async function pathComplete(input) {
+  const value = input.value;
   const dir = value.slice(0, value.lastIndexOf("/") + 1);
-  if (dir === browseDir) return;
-  browseDir = dir;
+  if (browsedDir.get(input) === dir) return;
+  browsedDir.set(input, dir);
+  const list = document.getElementById(input.getAttribute("list"));
+  if (!list) return;
+  const q = new URLSearchParams({path: value});
+  if (input.dataset.dirs) q.set("dirs", "1");
+  if (input.dataset.base) q.set("base", input.dataset.base);
   try {
-    const d = await (await fetch(`/api/browse?path=${encodeURIComponent(value)}`,
-      {headers: authHeaders()})).json();
-    const list = modal.querySelector("#art-suggest");
-    if (list && browseDir === dir) {
-      list.innerHTML = (d.paths || [])
-        .map(p => `<option value="${esc(p)}"></option>`).join("");
-    }
+    const d = await (await fetch(`/api/browse?${q}`, {headers: authHeaders()})).json();
+    if (browsedDir.get(input) !== dir) return;  // a later keystroke already won
+    list.innerHTML = (d.paths || [])
+      .map(p => `<option value="${esc(p)}"></option>`).join("");
   } catch { /* completions are optional */ }
 }
 
@@ -1521,7 +1654,8 @@ function artifactsTab(a) {
     <div class="art-list">${rows || '<div class="chat-loading">Nothing to show yet — pin a file or folder below.</div>'}</div>
     <div class="art-bar">
       <input class="art-add" list="art-suggest" spellcheck="false"
-        placeholder="pin a .md/.txt file or a folder — start typing a path…">
+        data-base="${esc(a.cwd || "")}"
+        placeholder="pin a .md/.txt file or a folder — type to complete inside ${esc(a.cwd || "this folder")}">
       <datalist id="art-suggest"></datalist>
       <button class="art-pin-btn">Pin</button>
     </div>
@@ -1580,7 +1714,8 @@ function modalHeadHtml(a) {
       <button class="revive-btn" data-sid="${esc(a.sessionId)}" data-cwd="${esc(a.cwd || "")}"
         title="Start a new agent in ${esc(a.cwd || "its folder")} that resumes this conversation (claude --resume)">↑ Resurrect</button>`
              : `<button class="kill-btn${killArmed === a.sessionId ? " armed" : ""}"
-                  data-sid="${esc(a.sessionId)}" title="Terminate this agent"
+                  data-sid="${esc(a.sessionId)}" data-pid="${esc(String(a.pid || ""))}"
+                  title="Terminate this agent"
                   >${killArmed === a.sessionId ? "Confirm kill?" : "Kill"}</button>`}
     <button class="modal-close" title="Close (Esc)">✕</button>`;
 }
@@ -1605,9 +1740,23 @@ function composerHtml(a) {
   </div>`;
 }
 
+/* The agent whose card is open — following it if its session id changes under
+   us. A session with no registry entry yet is shown under a "new-<pid>"
+   placeholder until its transcript names it, and a resumed session spends about
+   a second like that. When the real id arrived the open card lost its subject
+   and shut itself, which looked exactly like the agent dying. It is the same
+   process throughout, so the pid is what identifies it across the swap. */
 function currentAgent() {
-  return agents.find(x => x.sessionId === openSid)
-      || history.find(x => x.sessionId === openSid);
+  const found = agents.find(x => x.sessionId === openSid)
+             || history.find(x => x.sessionId === openSid);
+  if (found) return found;
+  const sameProc = openPid && agents.find(x => x.pid === openPid);
+  if (sameProc) {
+    openSid = sameProc.sessionId;   // it was renamed, not lost
+    chat = {sid: null, messages: null, error: null};  // refetch under the new id
+    loadChat(openSid);
+  }
+  return sameProc;
 }
 
 /* Adapt a past-session row into the shape the card and modal already expect,
@@ -1858,9 +2007,11 @@ function renderModal() {
 
 function openModal(sid) {
   openSid = sid;
+  openPid = (agents.find(x => x.sessionId === sid) || {}).pid || null;
   activeTab = "exchange";  // finished conversations only have this one  // land on the conversation, scrolled to the latest
   lastRenderedTab = null;
-  chat = {sid: null, messages: null};
+  chat = {sid: null, messages: null, error: null};
+  chatStamp = null;
   arts = {sid: null, files: [], sources: [], open: [], texts: {}, error: null};
   browseDir = null;
   overlay.classList.remove("hidden");
@@ -1871,7 +2022,9 @@ function openModal(sid) {
 
 function closeModal() {
   openSid = null;
+  openPid = null;
   killArmed = null;
+  chatStamp = null;  // the next pet opened must fetch its own conversation
   lastBodyHtml = lastHeadHtml = lastTabHtml = "";
   modal.dataset.sid = "";
   overlay.classList.add("hidden");
@@ -1972,16 +2125,19 @@ function render(force) {
     } else {
       parts.push(["empty", `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`]);
     }
-    if (history.length) {
-      const shown = graveOpen ? graveSorted(history.filter(graveMatches)) : [];
+    // A resurrected session is still in `history` until that endpoint catches
+    // up, so the tallies count what is genuinely past, not what was fetched.
+    const past = history.filter(isPast);
+    if (past.length) {
+      const shown = graveOpen ? graveSorted(past.filter(graveMatches)) : [];
       parts.push(["head:grave", `<div class="group-head grave">
           <span class="group-label">Past sessions</span>
-          <span class="group-count">${history.length}</span>
+          <span class="group-count">${past.length}</span>
           <span class="group-rule"></span>
           <button class="grave-toggle">${graveOpen ? "hide" : "show"}</button>
         </div>`]);
       if (graveOpen) {
-        parts.push(["grave-filter", graveFilterHtml(shown.length, history.length)]);
+        parts.push(["grave-filter", graveFilterHtml(shown.length, past.length)]);
         parts.push(["grave-grid", `<div class="grave-grid">${
           graveFamilies(shown).map(graveFamilyHtml).join("")
           || '<div class="empty">Nothing matches that filter.</div>'}</div>`]);
@@ -2108,8 +2264,9 @@ async function reviveAgent(btn) {
   const r = await post("/api/spawn", {cwd, resume: sid, prompt: "", name: ""});
   if (r.ok) {
     closeModal();
-    toast(`Resumed in ${cwd} — the new pet appears in a moment.`);
+    toast(`Resumed in ${cwd} — it comes back on the shelf in a moment.`);
     tick();
+    loadHistory();  // its headstone is no longer a headstone
   } else {
     btn.disabled = false;
     btn.textContent = "↑ Resurrect";
@@ -2135,7 +2292,10 @@ async function killAgent(btn) {
   }
   killArmed = null;
   btn.textContent = "Killing…";
-  const ok = (await post("/api/kill", {sid})).ok;
+  // The pid goes along: two processes can share a session id if a
+  // conversation was resumed while it was still open, and the id alone could
+  // pick the other one.
+  const ok = (await post("/api/kill", {sid, pid: btn.dataset.pid ? +btn.dataset.pid : undefined})).ok;
   if (ok) { closeModal(); tick(); }
   else { btn.textContent = "Kill failed"; }
 }
@@ -2209,7 +2369,12 @@ document.body.addEventListener("click", e => {
     setMode(mb.dataset.target, mb.dataset.mode);
     return;
   }
-  if (e.target.closest(".modal-close") || e.target === overlay) {
+  // Clicking the backdrop closes the card — but only when the press *started*
+  // there. Selecting text in the conversation and releasing outside the window
+  // fires a click whose target is the nearest common ancestor, i.e. the
+  // backdrop, which slammed the card shut mid-selection.
+  if (e.target.closest(".modal-close")
+      || (e.target === overlay && pressStart === overlay)) {
     closeModal();
     return;
   }
@@ -2261,7 +2426,7 @@ async function pinArtifact() {
 }
 
 document.body.addEventListener("input", e => {
-  if (e.target.closest(".art-add")) loadBrowse(e.target.value);
+  if (e.target.closest(".art-add") || e.target === spawnCwd) pathComplete(e.target);
   if (e.target.closest(".grave-search")) {
     graveFilter.text = e.target.value;
     refreshGraveResults();
@@ -2352,7 +2517,11 @@ async function doSpawn() {
 document.getElementById("new-agent").addEventListener("click", openSpawn);
 document.getElementById("spawn-cancel").addEventListener("click", closeSpawn);
 document.getElementById("spawn-go").addEventListener("click", doSpawn);
-spawnOverlay.addEventListener("click", e => { if (e.target === spawnOverlay) closeSpawn(); });
+// Same rule as the card's backdrop: only a press that began on the backdrop
+// closes it, so a selection dragged out of the dialog doesn't discard it.
+spawnOverlay.addEventListener("click", e => {
+  if (e.target === spawnOverlay && pressStart === spawnOverlay) closeSpawn();
+});
 spawnCwd.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); spawnName.focus(); } });
 spawnCwd.addEventListener("change", loadResumable);
 spawnName.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); spawnPrompt.focus(); } });
@@ -2368,6 +2537,7 @@ async function tick() {
     const data = await res.json();
     agents = data.agents || [];
     spawnDir = data.spawn_dir || spawnDir;
+    me = data.user || me;
     baselineUnseen();  // never-met sessions start "seen", not "new"
     if (Object.keys(seen).length > 300) {  // prune marks of long-gone sessions
       const live = new Set(agents.map(a => a.sessionId));
@@ -2387,7 +2557,14 @@ async function tick() {
     }
     conn.textContent = `updated ${new Date().toLocaleTimeString()}`;
     conn.classList.remove("err");
-    if (openSid) loadChat(openSid);  // Overview + Exchange both use the chat
+    // Overview and Exchange both read the chat, but only refetch it when the
+    // conversation has actually moved (see chatStamp).
+    if (openSid) {
+      const open = agents.find(x => x.sessionId === openSid);
+      if (chat.sid !== openSid || !open || open.last_activity !== chatStamp) {
+        loadChat(openSid);
+      }
+    }
   } catch {
     conn.textContent = "server unreachable";
     conn.classList.add("err");

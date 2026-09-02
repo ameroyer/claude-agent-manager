@@ -78,7 +78,9 @@ state and the card saying so, so keep the cache below the poll.</p>
   <tr><td><code>/api/state</code></td><td>the board; polled</td></tr>
   <tr><td><code>/api/chat</code></td><td>one conversation, live or past</td></tr>
   <tr><td><code>/api/history</code></td><td>past sessions; own 30&nbsp;s TTL, never in the poll</td></tr>
-  <tr><td><code>/api/artifacts</code>, <code>/api/browse</code></td><td>pinned files; path completion</td></tr>
+  <tr><td><code>/api/artifacts</code>, <code>/api/browse</code></td><td>pinned files; path completion
+      (<code>dirs=1</code> folders only, <code>base=</code> resolves a relative prefix against the
+      agent's folder). Listing only — it returns names, never contents.</td></tr>
   <tr><td><code>/api/sessions</code>, <code>/api/debug</code></td><td>resumable sessions; why a session isn't on the board</td></tr>
   <tr><th>POST</th><th></th></tr>
   <tr><td><code>/api/send</code>, <code>/api/key</code></td><td>type into a pane; press one allowed key</td></tr>
@@ -177,11 +179,45 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
   <li><strong>A Task sub-agent's <code>tool_use</code> is only written once it finishes.</strong>
       Live ones come from the pane's agent roster (<code>●&nbsp;main</code> /
       <code>◯&nbsp;type</code>).</li>
+  <li><strong>tmux starting is not Claude starting.</strong> If a <code>--resume</code> can't be
+      honoured, Claude Code prints <em>"No conversation found with session ID"</em> and exits at
+      once, leaving a new tmux session at a shell prompt and nothing on the board — while the
+      spawn reported success. <code>spawn_session</code> now waits for the UI to come up or for
+      that message, and tears the empty session down. Match the message <em>exactly</em>: a
+      looser rule ("command not found") also matched the noise a login profile prints into
+      every new pane, and would have killed good sessions.</li>
+  <li><strong>Resuming a conversation that is already open starts a second process on the same
+      session id and transcript.</strong> Both appear on the board under one id, they interleave
+      their writes, and a kill that finds an agent by id alone can hit the wrong one. Resume is
+      refused for a live session, and kill takes a pid to disambiguate.</li>
+  <li><strong><code>claude --resume</code> keeps the same session id and the same
+      transcript.</strong> A resurrected agent <em>is</em> the session its headstone was cut
+      for, so "live" and "past" can name the same id. <code>/api/history</code> re-checks its
+      cached rows against the live board, and the cemetery re-checks again on every render —
+      the cache alone left a running agent with a grave for up to 90 seconds.</li>
+  <li><strong>A session's id can change while you are looking at it.</strong> A process with no
+      registry entry yet is shown under a <code>new-&lt;pid&gt;</code> placeholder, and a
+      resumed session spends about half a second there because its transcript is <em>older</em>
+      than its process. The pid is the stable identity: it pins the id server-side so it cannot
+      flap back, and the open card follows the pid rather than closing itself.</li>
+  <li><strong>A click's target is the nearest common ancestor of press and release.</strong>
+      Selecting text in the conversation and releasing outside the window therefore reports the
+      modal backdrop, and closed the card mid-selection. Close on a backdrop click only when the
+      press <em>began</em> on the backdrop.</li>
+  <li><strong>Walk up the process tree, not down.</strong> Mapping panes to agents by expanding
+      every pane's descendants needs the whole process table, and
+      <code>ps -eo pid=,ppid=</code> was 50 ms of a 67 ms board build on a machine with 2,500
+      processes — a 2,500-entry tree to answer a question about a dozen. Enumerate the Claude
+      processes and walk up to their pane instead. Check the uid before reading
+      <code>comm</code>: one stat against an open-read-close, and on a shared login box only 5%
+      of processes were ours. Together: 67 ms → 22 ms and one fewer subprocess.</li>
   <li><strong>tmux daemonises</strong>, so a spawned session's process parent is the tmux
       server. Lineage must be recorded while both sessions are alive — the link comes from the
-      parent's transcript (<code>_NEW_SESSION_RE</code>) or the spawn log, and it is keyed by
-      tmux <em>session name</em>, so reusing one name for several agents in turn only ever links
-      whichever was alive at the time. In the cemetery a headstone can only share a plot with a
+      parent's transcript (<code>_NEW_SESSION_RE</code>), matched by tmux <em>session name</em>,
+      so reusing one name for several agents in turn only ever links whichever was alive at the
+      time. Only a real agent is a parent: sessions started from the dashboard were once
+      attributed to "dashboard", which is not one, and which — being keyed by session name —
+      stuck to whatever unrelated agent later took the name. In the cemetery a headstone can only share a plot with a
       launcher that is also dead; otherwise it just names the launcher on the card.</li>
   <li><strong>A transcript record can be larger than any fixed head window</strong> (one starts
       with a 205&nbsp;KB line). Read by lines, not bytes.</li>
@@ -189,6 +225,12 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       of <code>/proc/&lt;pid&gt;/stat</code> plus uptime.</li>
   <li><strong><code>&gt;&gt;</code> is a signed shift in JS.</strong> Hashes past 2³¹ go negative
       and index arrays with <code>-3</code>. Use <code>&gt;&gt;&gt;</code>.</li>
+  <li><strong>FNV-1a's lowest bit is only the parity of the input characters.</strong> Its
+      multiplier is odd, so <code>lowbit(h·prime) = lowbit(h)</code>: deriving one bit per cell
+      with <code>hash(seed + x + y) &amp; 1</code> made the user identicon the same checkerboard
+      for every name. Seed a xorshift and take whole words from it. Identicons also need a
+      <em>fixed</em> cell count — rolling each cell independently leaves some names with three
+      lit pixels, which reads as scattered dots.</li>
   <li><strong><code>input[type=number].selectionStart</code> is null</strong>, so restoring a
       caret sends it to 0 and reverses typing. Do not rebuild a focused control at all.</li>
   <li><strong>Same-specificity CSS is decided by file order.</strong> <code>.mascot</code>
@@ -231,6 +273,9 @@ selection, the caret. So:</p>
       panel traps the wheel and loses its position;</li>
   <li>hold transient UI state (an armed Kill button) in JS, never on the element, or the next
       rebuild wipes it;</li>
+  <li>cache a completion request by the <em>directory</em> it lists, not by the whole string —
+      the browser filters within one directory itself, so typing a 49-character path costs 9
+      requests instead of 49, and a long filename costs none;</li>
   <li>position a popup from its <em>trigger's</em> rect (<code>placeMenu</code>: fixed, in
       <code>&lt;body&gt;</code>, flipped up when there is no room below, clamped to the
       viewport) — offsets relative to whatever container it lands in are tuned for one call
