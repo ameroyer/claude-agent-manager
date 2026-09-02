@@ -276,6 +276,15 @@ selection, the caret. So:</p>
   <li>cache a completion request by the <em>directory</em> it lists, not by the whole string —
       the browser filters within one directory itself, so typing a 49-character path costs 9
       requests instead of 49, and a long filename costs none;</li>
+  <li><strong>never repeat a sprite per row.</strong> A pet is ~200 <code>&lt;rect&gt;</code>s —
+      fine once on a card, ruinous beside every message. A 150-message Exchange reached 7,773
+      rects and 625 KB of markup that the browser re-parsed on every render. Define it once as
+      a <code>&lt;symbol&gt;</code> and <code>&lt;use&gt;</code> it: 249 rects, 170 KB;</li>
+  <li><strong>gate a refetch on something that actually changes.</strong> The open conversation
+      was re-fetched every poll; a busy agent's transcript always differs, so that was ~24 ms
+      of server work re-reading a 4 MB tail plus ~60 KB on the wire, 100 times a minute, to
+      render identical messages. <code>last_activity</code> is already on the board and only
+      moves when a message lands, so it decides (<code>chatIsStale</code>);</li>
   <li>position a popup from its <em>trigger's</em> rect (<code>placeMenu</code>: fixed, in
       <code>&lt;body&gt;</code>, flipped up when there is no room below, clamped to the
       viewport) — offsets relative to whatever container it lands in are tuned for one call

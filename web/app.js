@@ -1314,9 +1314,8 @@ async function copyText(text, btn) {
 }
 
 function lastExchangeHtml(a) {
-  // Prefer the live chat tail — shows the recent messages, tool calls and
-  // thinking (what the model is doing now). Fall back to the lightweight
-  // last_exchange from /api/state until the full chat has loaded.
+  // Prefer the live chat tail — the recent messages, tool calls and thinking,
+  // i.e. what the model is doing now.
   let msgs;
   if (chat.sid === a.sessionId && chat.messages && chat.messages.length) {
     const all = chat.messages;
@@ -1333,9 +1332,9 @@ function lastExchangeHtml(a) {
     } else {
       msgs = all.slice(-10);
     }
-  } else if (a.last_exchange && a.last_exchange.length) {
-    msgs = a.last_exchange;
   } else {
+    // Until /api/chat lands (a fraction of a second), show the two-line preview
+    // the board already carries.
     msgs = [];
     if (a.last_prompt) msgs.push({role: "user", text: a.last_prompt});
     if (a.last_assistant) msgs.push({role: "assistant", text: a.last_assistant});
@@ -1786,7 +1785,7 @@ function graveAgent(h) {
     permission_mode: null, title: h.title, tokens: h.tokens,
     context_tokens: h.tokens || null,
     spawned_by: h.parent_name || null, spawned_by_sid: h.parent || null,
-    last_prompt: null, last_assistant: null, last_exchange: [],
+    last_prompt: null, last_assistant: null,
   };
 }
 

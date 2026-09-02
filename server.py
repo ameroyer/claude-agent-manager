@@ -316,7 +316,7 @@ def tail_transcript(cwd, session_id):
     info = {"last_assistant": None, "last_prompt": None, "title": None,
             "mtime": None, "context_tokens": None, "context_breakdown": None,
             "permission_mode": None, "pending_tool": None, "last_activity": None,
-            "last_assistant_ts": None, "last_prompt_ts": None, "subagents": [],
+            "subagents": [],
             "spawned": []}
     if not os.path.exists(path):
         return info
@@ -373,7 +373,6 @@ def tail_transcript(cwd, session_id):
                          if isinstance(b, dict) and b.get("type") == "text"]
                 if texts:
                     info["last_assistant"] = " ".join(texts)[:EXCHANGE_PREVIEW_CHARS]
-                    info["last_assistant_ts"] = rec.get("timestamp")
         elif t == "user" and not info["last_prompt"]:
             content = (rec.get("message") or {}).get("content")
             if isinstance(content, list):  # some human turns are text-block lists
@@ -382,7 +381,6 @@ def tail_transcript(cwd, session_id):
             if isinstance(content, str) and content.strip() and \
                     not content.startswith("<") and "tool_result" not in line[:200]:
                 info["last_prompt"] = content[:EXCHANGE_PREVIEW_CHARS]
-                info["last_prompt_ts"] = rec.get("timestamp")
         elif t == "ai-title" and not info["title"]:
             info["title"] = rec.get("aiTitle") or rec.get("title")
         elif t == "last-prompt" and not info["last_prompt"]:
@@ -1383,15 +1381,6 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
     tasks = load_tasks(sid)
     last_event = load_events(sid)
     tinfo = tail_transcript(cwd, sid)
-    # Preview of the latest turn, straight from the tail we already parsed.
-    # This used to re-parse the whole 2 MB chat tail per agent per poll just to
-    # recover two messages tail_transcript had already found. /api/chat still
-    # builds the full conversation, but only for the one card you have open.
-    last_exchange = [m for m in (
-        {"role": "user", "text": tinfo["last_prompt"], "ts": tinfo["last_prompt_ts"]},
-        {"role": "assistant", "text": tinfo["last_assistant"],
-         "ts": tinfo["last_assistant_ts"]}) if m["text"]]
-    last_exchange.sort(key=lambda m: iso_to_epoch(m["ts"]) or 0)  # chat order
     pstatus = pane_status(pane["target"], (captures or {}).get(pane["target"])) if pane else {
         "mode": None, "activity": None, "working": None, "prompt": None,
         "progress": None, "subagents": []}
@@ -1441,9 +1430,12 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
         "notification": notif_msg,
         "last_event_ts": (last_event or {}).get("ts"),
         "title": tinfo["title"],
+        # These two are the whole preview of the latest turn. There used to be a
+        # third field, `last_exchange`, holding exactly the same two strings
+        # again as a structured list — a third of the polled payload, sent 100
+        # times a minute, duplicating its neighbours.
         "last_assistant": tinfo["last_assistant"],
         "last_prompt": tinfo["last_prompt"],
-        "last_exchange": last_exchange,
         "transcript_mtime": tinfo["mtime"],
         "last_activity": last_activity,
         "context_tokens": ctx_tokens,
