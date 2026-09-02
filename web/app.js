@@ -1427,6 +1427,14 @@ let chat = {sid: null, messages: null, error: null};
    board payload and only moves when a real message lands, so it decides. */
 let chatStamp = null;
 
+/* Does the open conversation need fetching again? Only if we have not fetched
+   it, or the board says it moved since we did. */
+function chatIsStale(sid) {
+  if (chat.sid !== sid) return true;
+  const open = agents.find(x => x.sessionId === sid);
+  return !open || open.last_activity !== chatStamp;
+}
+
 async function loadChat(sid) {
   const stamp = (agents.find(x => x.sessionId === sid) || {}).last_activity ?? null;
   try {
@@ -2558,13 +2566,8 @@ async function tick() {
     conn.textContent = `updated ${new Date().toLocaleTimeString()}`;
     conn.classList.remove("err");
     // Overview and Exchange both read the chat, but only refetch it when the
-    // conversation has actually moved (see chatStamp).
-    if (openSid) {
-      const open = agents.find(x => x.sessionId === openSid);
-      if (chat.sid !== openSid || !open || open.last_activity !== chatStamp) {
-        loadChat(openSid);
-      }
-    }
+    // conversation has actually moved.
+    if (openSid && chatIsStale(openSid)) loadChat(openSid);
   } catch {
     conn.textContent = "server unreachable";
     conn.classList.add("err");
