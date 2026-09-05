@@ -190,6 +190,21 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       opening prompt is often wrapped in a <code>&lt;…&gt;</code> preamble of standing
       instructions; strip that or every fork looks identical. <code>/api/chat</code> resolves a
       sub-agent by the path on the row the server produced, never by building one from the id.</li>
+  <li><strong>A session's model is only ever recorded on an assistant message</strong>, so
+      switching it is invisible — pill, hat and colour all keep the old one — until the session
+      next replies, which for an idle pet is never. But <code>/model &lt;id&gt;</code> is written
+      to the transcript as a <code>local_command</code> the moment it runs, so a switch newer
+      than the last reply can be read straight off the file
+      (<code>model_command_arg</code>) and shown as <em>pending</em>. It needs no server-side
+      state and clears itself: once the session speaks, the reply is the fact and wins —
+      including when the switch was declined at the CLI's own confirm dialog. Any
+      <code>/model</code> counts, so typing it in the pane moves the pet too. Stop at the
+      newest one even when it names nothing (a bare <code>/model</code> opens the CLI's picker),
+      or an older switch gets dug up and reported as if it were still coming.</li>
+  <li><strong>A sub-agent is not necessarily on its parent's model.</strong> An agent
+      definition can name its own, so inheriting the parent's put the wrong hat on every
+      cheap helper. It is read from the sub-agent's own transcript instead, and a fork that
+      has not answered yet stays an egg rather than borrowing one.</li>
   <li><strong>A Task sub-agent's <code>tool_use</code> is only written once it finishes.</strong>
       Live ones come from the pane's agent roster (<code>●&nbsp;main</code> /
       <code>◯&nbsp;type</code>).</li>

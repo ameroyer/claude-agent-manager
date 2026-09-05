@@ -988,6 +988,9 @@ main {
 }
 button.model-tag { cursor: pointer; }
 button.model-tag:hover { background: var(--lcd); }
+/* Asked for, not yet confirmed by a reply. A dashed edge says "not settled"
+   without motion — nothing on the shelf is allowed to blink. */
+.model-tag.pending { border-style: dashed; opacity: .85; }
 /* model chooser: a real popup, not a native select element (whose
    blur-on-open quirk closed it before it could be used) */
 /* Positioned in script against the button that opened it (see placeMenu), not
@@ -1159,8 +1162,16 @@ button.model-tag:hover { background: var(--lcd); }
 /* sub-agent list in the modal */
 .sub-list { display: flex; flex-direction: column; gap: 6px; }
 .sub-row {
-  display: grid; grid-template-columns: auto 1fr auto; gap: 10px;
+  display: grid; grid-template-columns: auto auto 1fr auto auto; gap: 10px;
   align-items: center; font-size: 12.5px; color: var(--ink-2);
+}
+/* Small enough to read as a marker beside the name rather than as a card of
+   its own — these are records, not pets on the shelf. */
+.sub-pet { display: flex; width: 20px; height: 20px; }
+.sub-mascot { width: 20px; height: 20px; }
+.sub-model {
+  font: 11px var(--mono); color: var(--muted);
+  white-space: nowrap; text-align: right;
 }
 .sub-row .sub-chip {
   background: var(--surface-2); color: var(--ink-2);
@@ -1175,6 +1186,7 @@ button.model-tag:hover { background: var(--lcd); }
 .sub-state.running { color: var(--good); }
 .sub-state.starting { color: var(--warning); }
 .sub-row.done { color: var(--muted); }
+.sub-row.done .sub-pet { opacity: .55; }   /* history, like the rest of the row */
 
 /* The finished ones fold away behind one line. */
 .sub-fold {

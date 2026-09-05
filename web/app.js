@@ -148,6 +148,24 @@ const MODEL_SKIN = {
 };
 const MODEL_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
 
+/* A `/model` is recorded the moment it runs, but the model itself only ever on
+   an assistant message — so between the two the board would go on showing the
+   old one, and for a pet that is sitting idle it would show it indefinitely.
+   The requested model is therefore what the pet is drawn as, marked pending,
+   until the session speaks: at that point the reply is the fact, this clears
+   itself, and a switch that was declined at the CLI's dialog corrects with it. */
+const PENDING_MODEL_TIP = "Switched — this is the model it will answer with. "
+  + "The session hasn't replied yet, and only a reply makes it official.";
+
+function modelPending(a) {
+  return !!a.model_pending
+      && modelFamily(a.model_pending) !== modelFamily((a.context_breakdown || {}).model);
+}
+
+function shownModel(a) {
+  return modelPending(a) ? a.model_pending : (a.context_breakdown || {}).model;
+}
+
 function modelFamily(model) {
   const m = (model || "").toLowerCase();
   if (m.includes("fable") || m.includes("mythos")) return "fable";
@@ -242,7 +260,7 @@ function outfitMap() {
 }
 
 function critterOf(a) {
-  const family = modelFamily((a.context_breakdown || {}).model);
+  const family = modelFamily(shownModel(a));
   const rk = repoKeyOf(a), ik = itemKeyOf(a);
   const {colors, items} = outfitMap();
   // The fallbacks cover pets that aren't on the board (the brand mark).
@@ -481,7 +499,7 @@ function mascotRects(a, opts = {}) {
   const px = [];
   const cell = (x, y, c) =>
     px.push(`<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${c}"/>`);
-  if (!(a.context_breakdown || {}).model) {  // no reply yet: an egg, no outfit
+  if (!shownModel(a)) {  // no reply and nothing asked for: an egg, no outfit
     EGG.forEach(([x, y]) => cell(x, y, skin.body));
     EGG_SPECKLES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
     EYES.forEach(([x, y, r]) => cell(x, y, paint(r, accent)));
@@ -1072,16 +1090,33 @@ function subagentsHtml(a) {
    section stays the height of what is actually happening. */
 const subDoneOpen = new Set();
 
+/* A sub-agent that exists only in the pane roster has written nothing yet, so
+   there is no transcript to take a model or a repo from. It is drawn from its
+   parent — same folder, same branch, so the same body and the same held item —
+   with no model, which is exactly what makes a pet an egg. */
+function rosterPet(name, parent) {
+  return {sessionId: `${parent.sessionId} roster ${name}`,
+          name, state: "busy", cwd: parent.cwd, git: parent.git,
+          context_breakdown: null, tmux: null, remote: false};
+}
+
 function subRowHtml(row) {
   // "starting…" is a roster entry with no transcript yet: nothing to open, and
   // it gets its own colour so it doesn't read as a running agent you can read.
   const cls = row.state;
+  const family = modelFamily(shownModel(row.pet));
   return `<div class="sub-row ${cls}${row.sid ? " open" : ""}"${
       row.sid ? ` data-sid="${esc(row.sid)}"` : ""}
     title="${row.sid ? "Open this sub-agent's transcript"
                      : "Just launched — it hasn't written anything yet"}">
+    <span class="sub-pet">${mascotSvg(row.pet, "sub-mascot", {hideItem: true})}</span>
     <span class="sub-chip ${cls}">${esc(row.name)}</span>
     <span class="sub-task">${esc(row.task || "—")}</span>
+    ${family === "other"
+      // Kept as an empty cell rather than dropped: the rows are a grid, and a
+      // missing one would slide that row's state word out of the column.
+      ? `<span class="sub-model"></span>`
+      : `<span class="sub-model" title="Runs on ${esc(MODEL_SKIN[family].label)} — a sub-agent can be given a model of its own">${esc(MODEL_SKIN[family].label)}</span>`}
     <span class="sub-state ${cls}">${
       cls === "running" ? "running" : cls === "starting" ? "starting…" : "done"}</span>
   </div>`;
@@ -1094,10 +1129,10 @@ function subagentsSectionHtml(a) {
   if (!pets.length && !roster.length) return "";
   const rows = [
     ...pets.slice().reverse().map(p => ({
-      sid: p.sessionId, name: p.name, task: p.title,
+      sid: p.sessionId, name: p.name, task: p.title, pet: p,
       state: p.state === "busy" ? "running" : "done"})),
     ...roster.map(s => ({
-      sid: null, name: s.type, task: s.task,
+      sid: null, name: s.type, task: s.task, pet: rosterPet(s.type || "?", a),
       state: s.running ? "starting" : "done"})),
   ];
   const live = rows.filter(r => r.state !== "done");
@@ -1149,7 +1184,8 @@ function cardHtml(a) {
   const tasks = a.tasks || [];
   const done = tasks.filter(t => t.status === "completed").length;
   const total = tasks.length;
-  const model = MODEL_SKIN[modelFamily((a.context_breakdown || {}).model)];
+  const model = MODEL_SKIN[modelFamily(shownModel(a))];
+  const pend = modelPending(a);
   const accent = critterOf(a).accent;
 
   const ctx = contextInfo(a);
@@ -1175,8 +1211,9 @@ function cardHtml(a) {
         ${a.tag ? `<span class="tag-pip" title="Tagged “${esc(a.tag)}”">#${esc(a.tag)}</span>` : ""}
         ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
         ${drafts[a.sessionId] ? `<span class="draft-pip" title="Unsent message waiting here: ${esc(drafts[a.sessionId].slice(0, 120))}">draft</span>` : ""}
-        ${a.tmux ? `<button class="model-tag" data-target="${esc(a.tmux.target)}"
-           title="Model (the pet's colour) — click to switch model">${esc(model.label)}</button>`
+        ${a.tmux ? `<button class="model-tag${pend ? " pending" : ""}" data-target="${esc(a.tmux.target)}"
+           title="${pend ? PENDING_MODEL_TIP : "Model (the pet's colour) — click to switch model"}"
+           >${esc(model.label)}${pend ? "…" : ""}</button>`
          : `<span class="model-tag" title="Model — the pet's colour">${esc(model.label)}</span>`}
       </div>
       <div class="lcd-dir" title="Working directory: ${esc(a.cwd)}">${esc(a.cwd)}</div>
@@ -1937,7 +1974,8 @@ function modalHtml(a) {
 }
 
 function modalHeadHtml(a) {
-  const model = MODEL_SKIN[modelFamily((a.context_breakdown || {}).model)];
+  const model = MODEL_SKIN[modelFamily(shownModel(a))];
+  const pend = modelPending(a);
   return `<span class="modal-pet">${mascotSvg(a, "modal-mascot")}</span>
     ${badge(a.state)}
     <span class="name-holder">
@@ -1950,8 +1988,10 @@ function modalHeadHtml(a) {
         >${a.tag ? `#${esc(a.tag)}` : "+ tag"}</button>
     </span>
     ${a.tmux
-      ? `<button class="model-tag" data-target="${esc(a.tmux.target)}" style="color:${model.outline}"
-           title="Model (the pet's hat) — click to switch">${esc(model.label)}</button>`
+      ? `<button class="model-tag${pend ? " pending" : ""}" data-target="${esc(a.tmux.target)}"
+           style="color:${model.outline}"
+           title="${pend ? PENDING_MODEL_TIP : "Model (the pet's hat) — click to switch"}"
+           >${esc(model.label)}${pend ? "…" : ""}</button>`
       : `<span class="model-tag" style="color:${model.outline}" title="Model — the pet's hat">${esc(model.label)}</span>`}
     ${modeChipHtml(a, "head-mode")}
     <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
@@ -2365,7 +2405,10 @@ function subAgentPet(r, parent) {
     title: r.title, last_assistant: r.title,
     startedAt: r.started, last_activity: r.last_activity,
     tmux: null, remote: false, dead: !r.running, tasks: [], subagents: [],
-    context_breakdown: parent ? parent.context_breakdown : null,
+    // Its own model, off its own transcript — an agent definition can name one,
+    // so a fork is not always on the parent's. Until it has answered there is
+    // nothing to read and it stays an egg, like any session that hasn't spoken.
+    context_breakdown: r.model ? {model: r.model} : null,
     starred: false, tag: null,
   };
 }

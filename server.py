@@ -321,10 +321,10 @@ MAX_SUBAGENT_ROWS = 12
 
 
 def _read_subagent(path, name):
-    """Head for its name and task, tail for when it last spoke."""
+    """Head for its name and task, tail for its model and when it last spoke."""
     row = {"sessionId": os.path.splitext(name)[0], "path": path,
            "name": None, "title": None, "cwd": None, "branch": None,
-           "started": None, "last_activity": None}
+           "started": None, "last_activity": None, "model": None}
     try:
         with open(path, "rb") as f:
             head = f.read(64 * 1024).decode("utf-8", "replace").splitlines()
@@ -353,11 +353,17 @@ def _read_subagent(path, name):
             break
     for line in reversed(tail):
         try:
-            ts = json.loads(line).get("timestamp")
+            rec = json.loads(line)
         except Exception:
             continue
-        if ts:
-            row["last_activity"] = iso_to_epoch(ts)
+        if row["last_activity"] is None and rec.get("timestamp"):
+            row["last_activity"] = iso_to_epoch(rec["timestamp"])
+        # Read the model rather than inherit the parent's: a sub-agent is not
+        # necessarily on it — an agent definition can name its own — so the hat
+        # would be a guess, and a wrong one for every Haiku helper.
+        if row["model"] is None and rec.get("type") == "assistant":
+            row["model"] = (rec.get("message") or {}).get("model")
+        if row["last_activity"] and row["model"]:
             break
     row["name"] = row["name"] or row["sessionId"]
     return row
@@ -407,6 +413,27 @@ def list_resumable(cwd):
 
 _tail_cache = {}
 
+# A session's model is only ever recorded on an assistant message, so switching
+# it is invisible — the pill and the pet's hat keep the old one — until the
+# session next replies, which for an idle agent may be never. But `/model <id>`
+# is written to the transcript as a local_command the moment it runs, so a
+# switch that is newer than the last reply can be read straight off the file.
+# Any `/model` counts, not just one this dashboard sent: typing it in the pane
+# yourself moves the hat too.
+_MODEL_CMD_RE = re.compile(
+    r"<command-name>/model</command-name>.*?<command-args>([^<]*)</command-args>",
+    re.S)
+
+
+def model_command_arg(content):
+    """The model named by a `/model <id>` command record, or None.
+
+    Bare `/model` opens the CLI's own picker and the transcript records no
+    argument — there is no way to know what was chosen there, so nothing is
+    claimed rather than guessed."""
+    m = _MODEL_CMD_RE.search(content or "")
+    return (m.group(1).strip()[:40] or None) if m else None
+
 
 def tail_transcript(cwd, session_id):
     """Return dict with last assistant text, last user prompt, title, mtime.
@@ -415,7 +442,7 @@ def tail_transcript(cwd, session_id):
     info = {"last_assistant": None, "last_prompt": None, "title": None,
             "mtime": None, "context_tokens": None, "context_breakdown": None,
             "permission_mode": None, "pending_tool": None, "last_activity": None,
-            "subagents": [],
+            "model_requested": None, "subagents": [],
             "spawned": []}
     if not os.path.exists(path):
         return info
@@ -436,6 +463,8 @@ def tail_transcript(cwd, session_id):
         return info
     if info["title"] is None:
         info["title"] = transcript_title(path)
+    replied_since = False   # an assistant record seen, i.e. newer than here
+    model_cmd_seen = False  # the newest /model wins, even when it names nothing
     for line in reversed(lines):
         if (info["last_assistant"] and info["last_prompt"] and info["title"]
                 and info["permission_mode"] and info["last_activity"]):
@@ -453,6 +482,7 @@ def tail_transcript(cwd, session_id):
             info["last_activity"] = iso_to_epoch(rec["timestamp"])
         t = rec.get("type")
         if t == "assistant":
+            replied_since = True
             msg = rec.get("message") or {}
             if info["context_tokens"] is None:
                 u = msg.get("usage") or {}
@@ -488,6 +518,16 @@ def tail_transcript(cwd, session_id):
                 info["last_prompt"] = p[:EXCHANGE_PREVIEW_CHARS]
         elif t == "permission-mode" and not info["permission_mode"]:
             info["permission_mode"] = rec.get("permissionMode")
+        elif (t == "system" and rec.get("subtype") == "local_command"
+                and not replied_since and not model_cmd_seen):
+            content = rec.get("content") or ""
+            if "<command-name>/model</command-name>" in content:
+                # Stop at the newest one whether or not it names a model: a bare
+                # `/model` opened the picker, and whatever was chosen there
+                # supersedes any earlier switch, so an older one must not be
+                # dug up and reported as if it were still what is coming.
+                model_cmd_seen = True
+                info["model_requested"] = model_command_arg(content)
     info.update(scan_tool_calls(lines))
     _tail_cache[session_id] = (mtime, info)
     return info
@@ -1721,6 +1761,9 @@ def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
         "context_tokens": ctx_tokens,
         "context_window": ctx_window if ctx_tokens else None,
         "context_breakdown": tinfo["context_breakdown"],
+        # A `/model` newer than the last reply: what it will use next, which the
+        # breakdown above cannot know yet. Drawn as pending, never as fact.
+        "model_pending": tinfo["model_requested"],
         "permission_mode": pstatus["mode"] or tinfo["permission_mode"],
         "activity": (pstatus["activity"] or sub_activity) if state == "busy" else None,
         "progress": pstatus["progress"] if state == "busy" else None,

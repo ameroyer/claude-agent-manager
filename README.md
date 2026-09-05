@@ -115,6 +115,9 @@ you restart them.
   auto-edit, plan, auto — from the card or the Overview tab. The mode switch
   presses ⇧⇥ in the session until its own footer reports the mode you picked, so
   what you see is what the CLI actually did. Bypass is left as a manual opt-in.
+  A model switch shows on the pet immediately — hat, colour and pill — marked
+  with a dashed edge until the session replies, because only a reply makes it
+  official. Typing `/model` in the pane yourself moves the pet just the same.
 - Spawn a new agent (pick a folder + optional first message), resume a past
   conversation from that folder (`claude --resume`), or kill one.
 - See where a session came from. A session that another *agent* launched says
@@ -127,9 +130,11 @@ you restart them.
   process — no pid, no pane, nothing to send input to — but they **do** keep
   their own transcript, so the parent's card says how many it ran and its
   Overview lists them with the directive each was given; click one to read the
-  whole exchange. Running and just-launched ones are coloured apart from the
-  finished ones, which fold away behind a single line. A pet with sub-agents
-  still running counts as working, even when it isn't the one typing.
+  whole exchange. Each row carries its own little pet and the model it runs —
+  read from its own transcript, since a sub-agent can be given a model of its
+  own rather than the parent's. Running and just-launched ones are coloured
+  apart from the finished ones, which fold away behind a single line. A pet with
+  sub-agents still running counts as working, even when it isn't the one typing.
 - Browse the folder an agent works in, two levels deep, from its Overview. One
   directory is read when you open it and never again until you reopen the card,
   and the server refuses to look outside that agent's own working directory.
