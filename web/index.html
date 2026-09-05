@@ -14,6 +14,19 @@
     <h1>TamaClaudchi</h1>
   </div>
   <div id="counts" class="stat-row"></div>
+  <!-- Static markup on purpose: the poll rebuilds the shelf, and a control it
+       rebuilt would lose focus and shut its own dropdown mid-click. -->
+  <div id="live-filters" class="live-filters">
+    <select id="live-tag" class="live-tag" title="Show only pets carrying this tag">
+      <option value="">all tags</option>
+    </select>
+    <label class="live-toggle" title="Show only starred pets">
+      <input type="checkbox" id="live-starred"> ★
+    </label>
+    <label class="live-toggle" title="Group pets that share a tag: starred ones full size, the rest beside them">
+      <input type="checkbox" id="live-group" checked> group
+    </label>
+  </div>
   <div id="legend" class="legend-wrap"></div>
   <button id="new-agent" class="new-agent-btn">+ hatch agent</button>
   <button id="theme-toggle" class="theme-btn" title="Switch light / dark">☀</button>

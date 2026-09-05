@@ -654,52 +654,98 @@ function mdInline(s) {
   return s
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener">$1</a>');
 }
 
+/* A GFM subset, enough for what an agent actually writes. Tables were the gap
+   that mattered: a plan or a summary is usually half tables, and without them
+   the whole thing arrived as a wall of pipes. */
+const _MD_HR = /^\s*([-*_])\1{2,}\s*$/;
+const _MD_TABLE_SEP = /^\s*\|[\s:|-]*-[\s:|-]*\|?\s*$/;
+const _MD_ROW = /^\s*\|/;
+
+function mdCells(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "")
+             .split("|").map(c => mdInline(c.trim()));
+}
+
 function mdHtml(text) {
   const lines = esc(text).split("\n");
   const out = [];
-  let inCode = false, inList = null, para = [];
+  let inCode = false, para = [], quote = [];
+  const stack = [];  // open list tags, outermost first
   const flushPara = () => {
     if (para.length) { out.push(`<p>${mdInline(para.join("<br>"))}</p>`); para = []; }
   };
-  const closeList = () => {
-    if (inList) { out.push(`</${inList}>`); inList = null; }
+  const closeLists = (depth = 0) => {
+    while (stack.length > depth) out.push(`</${stack.pop().tag}>`);
   };
-  for (const line of lines) {
+  const flushQuote = () => {
+    if (!quote.length) return;
+    out.push(`<blockquote>${quote.map(q => `<p>${mdInline(q)}</p>`).join("")}</blockquote>`);
+    quote = [];
+  };
+  const flushAll = () => { flushPara(); closeLists(); flushQuote(); };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (line.startsWith("```")) {
-      flushPara(); closeList();
+      flushAll();
       out.push(inCode ? "</code></pre>" : '<pre class="codeblock"><code>');
       inCode = !inCode;
       continue;
     }
     if (inCode) { out.push(line + "\n"); continue; }
+
+    // a table: a row of cells, then a separator row, then rows until it stops
+    if (_MD_ROW.test(line) && _MD_TABLE_SEP.test(lines[i + 1] || "")) {
+      flushAll();
+      const head = mdCells(line);
+      const body = [];
+      let j = i + 2;
+      while (j < lines.length && _MD_ROW.test(lines[j])) body.push(mdCells(lines[j++]));
+      out.push(`<table><thead><tr>${head.map(c => `<th>${c}</th>`).join("")}</tr></thead>`
+        + (body.length ? `<tbody>${body.map(r =>
+            `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody>` : "")
+        + `</table>`);
+      i = j - 1;
+      continue;
+    }
+    if (_MD_HR.test(line)) { flushAll(); out.push("<hr>"); continue; }
+
+    const q = line.match(/^\s*&gt;\s?(.*)$/);   // esc() has already run
+    if (q) { flushPara(); closeLists(); quote.push(q[1]); continue; }
+    flushQuote();
+
     const h = line.match(/^(#{1,4})\s+(.*)$/);
-    const ul = line.match(/^\s*[-*]\s+(.*)$/);
-    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const ul = line.match(/^(\s*)[-*]\s+(.*)$/);
+    const ol = line.match(/^(\s*)\d+[.)]\s+(.*)$/);
     if (h) {
-      flushPara(); closeList();
-      const lvl = Math.min(h[1].length + 2, 6);
-      out.push(`<h${lvl}>${mdInline(h[2])}</h${lvl}>`);
-    } else if (ul) {
+      flushAll();
+      out.push(`<h${Math.min(h[1].length + 2, 6)}>${mdInline(h[2])}</h${Math.min(h[1].length + 2, 6)}>`);
+    } else if (ul || ol) {
       flushPara();
-      if (inList !== "ul") { closeList(); out.push("<ul>"); inList = "ul"; }
-      out.push(`<li>${mdInline(ul[1])}</li>`);
-    } else if (ol) {
-      flushPara();
-      if (inList !== "ol") { closeList(); out.push("<ol>"); inList = "ol"; }
-      out.push(`<li>${mdInline(ol[1])}</li>`);
+      const m = ul || ol, tag = ul ? "ul" : "ol";
+      // Two spaces of indent is one level; capped so a stray deep indent in a
+      // pasted block can't open a dozen lists.
+      const depth = Math.min(Math.floor(m[1].replace(/\t/g, "  ").length / 2), 3);
+      while (stack.length && stack[stack.length - 1].depth > depth) closeLists(stack.length - 1);
+      const top = stack[stack.length - 1];
+      if (!top || top.depth < depth) { out.push(`<${tag}>`); stack.push({tag, depth}); }
+      else if (top.tag !== tag) { closeLists(stack.length - 1); out.push(`<${tag}>`); stack.push({tag, depth}); }
+      out.push(`<li>${mdInline(m[2])}</li>`);
     } else if (!line.trim()) {
-      flushPara(); closeList();
+      flushAll();
     } else {
+      closeLists();
       para.push(line);
     }
   }
   if (inCode) out.push("</code></pre>");
-  flushPara(); closeList();
+  flushAll();
   return `<div class="md">${out.join("")}</div>`;
 }
 
@@ -723,6 +769,78 @@ const MODE_CYCLE = ["default", "acceptEdits", "plan", "auto"];
    card's foot and the open pet's header cannot drift apart. The `m-<mode>`
    class carries the colour: at a glance across the shelf, which agents are
    allowed to act on their own is worth reading without stopping to parse text. */
+/* A tag cluster: the starred pets at full size, the rest small beside them.
+   Same two-column shape as a cemetery family plot, and for the same reason —
+   it is the layout that survives long names. */
+function clusterHtml(c) {
+  const n = c.stars.length + c.satellites.length;
+  return `<div class="tag-cluster" title="Tagged “${esc(c.tag)}” — ${n} pets share it">
+    <div class="tag-label">#${esc(c.tag)}</div>
+    <div class="tag-leads">${c.stars.map(cardHtml).join("")}</div>
+    <div class="tag-satellites">${c.satellites.map(miniCardHtml).join("")}</div>
+  </div>`;
+}
+
+/* A satellite. Built like a headstone, not like a shrunken card: a centred
+   column where every row is width-bounded and ellipsised, so a long session
+   name is clipped instead of spilling out of the box. It opens the same popup
+   a full card does. */
+function miniCardHtml(a) {
+  const accent = critterOf(a).accent;
+  const label = a.display_name || a.name;
+  const state = STATE_LABEL[a.state] || a.state;
+  const ctx = contextInfo(a);
+  return `<div class="mini-card ${esc(a.state)}" data-sid="${esc(a.sessionId)}"
+    style="--pet-accent:${accent};--card-tint:${accent}"
+    title="${esc(label)} — ${esc(state)}\n${esc(a.cwd || "")}${
+      a.tmux ? "\n" + esc(tmuxTitle(a.tmux.target)) : ""}">
+    ${starBtnHtml(a)}
+    <div class="mini-pet">${mascotSvg(a, "", {hideItem: true})}</div>
+    <div class="mini-name">${esc(label)}</div>
+    ${tmuxNameHtml(a, "mini-tmux")}
+    <div class="mini-path">${esc(a.cwd || "")}</div>
+    ${a.git ? `<div class="mini-git">${esc(a.git.repo || a.project)} · ${
+      esc(a.git.branch || "—")}</div>` : ""}
+    <div class="mini-facts">
+      <span>born ${ago(a.startedAt)}</span>${ctx ? `<span>${ctx.pct}% ctx</span>` : ""}
+    </div>
+    <div class="mini-state state-word ${esc(a.state)}">${esc(state)}</div>
+  </div>`;
+}
+
+/* The tmux session a pet lives in, shown next to its name so you can find it
+   without opening the card. The bare session name is what `tmux attach -t`
+   takes; the pane index stays on the chip at the foot of the full card. */
+function tmuxNameHtml(a, cls) {
+  if (!a.tmux) {
+    return a.remote ? `<div class="${cls} remote" title="Runs on another machine">elsewhere</div>` : "";
+  }
+  return `<div class="${cls}" title="tmux session — attach with:  tmux attach -t ${
+    esc(a.tmux.session)}">⧉ ${esc(a.tmux.session)}</div>`;
+}
+
+/* Starring is what promotes a pet to the front of its tag group. */
+function starBtnHtml(a) {
+  return `<button class="star-btn${a.starred ? " on" : ""}" data-sid="${esc(a.sessionId)}"
+    title="${a.starred ? "Starred — click to unstar"
+      : "Star this pet: within a tag, starred pets are shown full size"}"
+    >${a.starred ? "★" : "☆"}</button>`;
+}
+
+/* One conversation, held open in more than one pane — `claude --resume <id>`
+   run again somewhere else. The board folds them into a single pet, because
+   they are one conversation, but says so: two agents typing into one transcript
+   is a thing you probably want to know about and undo. */
+function dupTagHtml(a) {
+  const other = a.also_held_in || [];
+  if (!other.length) return "";
+  const n = other.length + 1;
+  return `<span class="dup-tag" title="This conversation is open in ${n} places at once:
+${esc([a.tmux ? a.tmux.target : "here", ...other].join("\n"))}
+
+They all read and write the same transcript. Close the ones you're not using.">⧉ ${n} panes</span>`;
+}
+
 function modeChipHtml(a, extra = "") {
   if (!a.permission_mode) return "";
   const short = MODE_SHORT[a.permission_mode] || a.permission_mode;
@@ -912,30 +1030,90 @@ function pendingLabel(a) {
    can never be a pet on the shelf. The parent's card is the only place they
    can be shown. Running ones are called out; finished ones fade to history and
    drop off entirely once there are newer ones. */
+/* Sub-agents a session ran with the Task tool, as one quiet line on its card.
+
+   They used to sit beside the parent as mini-cards, which put them next to
+   same-tag satellites — and those are a different kind of thing entirely: a
+   satellite is a real agent you can message, kill and re-model, a sub-agent is
+   a read-only record with no pid and no pane. Two things you act on differently
+   should not share a shape. So the shelf holds only real sessions now, and the
+   parent just says how many it ran; the list itself is in its popup. */
+function subagentCounts(a) {
+  const pets = subPets.filter(p => p.parent === a.sessionId);
+  // A sub-agent that has only just started has a roster entry but no transcript
+  // yet, so the roster is what keeps the running count honest.
+  const roster = (a.subagents || []);
+  const live = Math.max(pets.filter(p => p.state === "busy").length,
+                        roster.filter(s => s.running).length);
+  const total = Math.max(pets.length, roster.length, live);
+  return {live, total, done: Math.max(0, total - live)};
+}
+
 function subagentsHtml(a) {
-  const subs = a.subagents || [];
-  if (!subs.length) return "";
-  const live = subs.filter(s => s.running);
-  const shown = live.length ? live : subs.slice(-2);
-  return `<div class="subagents" title="Sub-agents spawned by this session. They run inside this agent, so they have no pet of their own.">
-    <span class="sub-label">${live.length ? "running" : "spawned"}</span>
-    ${shown.map(s => `<span class="sub-chip${s.running ? " live" : ""}"
-       title="${esc(s.type)}${s.task ? " — " + esc(s.task) : ""}">${esc(s.type)}</span>`).join("")}
+  const {live, total, done} = subagentCounts(a);
+  if (!total) return "";
+  const parts = [live ? `${live} running` : null, done ? `${done} done` : null]
+    .filter(Boolean).join(" · ");
+  return `<div class="subagents${live ? " live" : ""}"
+    title="This session ran ${total} Task sub-agent${total === 1 ? "" : "s"}. They run inside it — no pid, no pane, nothing to send input to. Open the card to read what each one did.">
+    <span class="sub-fork">⑂</span>
+    <span class="sub-count">${total} sub-agent${total === 1 ? "" : "s"}</span>
+    ${parts ? `<span class="sub-split">${esc(parts)}</span>` : ""}
+  </div>`;
+}
+
+/* The list itself, in the parent's popup — the one place a sub-agent is shown
+   in full. The ones that kept a transcript are openable: clicking reads the
+   whole exchange. Ones known only from the pane roster (just started, nothing
+   written yet) are listed too, but as plain rows with nothing to open. */
+/* Which parents have their finished sub-agents unfolded, by session id. A busy
+   session accumulates them — the running ones are the news, the finished ones
+   are history you occasionally want to read — so history folds away and the
+   section stays the height of what is actually happening. */
+const subDoneOpen = new Set();
+
+function subRowHtml(row) {
+  // "starting…" is a roster entry with no transcript yet: nothing to open, and
+  // it gets its own colour so it doesn't read as a running agent you can read.
+  const cls = row.state;
+  return `<div class="sub-row ${cls}${row.sid ? " open" : ""}"${
+      row.sid ? ` data-sid="${esc(row.sid)}"` : ""}
+    title="${row.sid ? "Open this sub-agent's transcript"
+                     : "Just launched — it hasn't written anything yet"}">
+    <span class="sub-chip ${cls}">${esc(row.name)}</span>
+    <span class="sub-task">${esc(row.task || "—")}</span>
+    <span class="sub-state ${cls}">${
+      cls === "running" ? "running" : cls === "starting" ? "starting…" : "done"}</span>
   </div>`;
 }
 
 function subagentsSectionHtml(a) {
-  const subs = a.subagents || [];
-  if (!subs.length) return "";
-  const rows = subs.slice().reverse().map(s => `<div class="sub-row${s.running ? " live" : ""}">
-    <span class="sub-chip${s.running ? " live" : ""}">${esc(s.type)}</span>
-    <span class="sub-task">${esc(s.task || "—")}</span>
-    <span class="sub-state">${s.running ? "running" : "done"}</span>
-  </div>`).join("");
+  const pets = subPets.filter(p => p.parent === a.sessionId);
+  const roster = (a.subagents || []).filter(s =>
+    !pets.some(p => (p.name || "") === (s.type || "")));
+  if (!pets.length && !roster.length) return "";
+  const rows = [
+    ...pets.slice().reverse().map(p => ({
+      sid: p.sessionId, name: p.name, task: p.title,
+      state: p.state === "busy" ? "running" : "done"})),
+    ...roster.map(s => ({
+      sid: null, name: s.type, task: s.task,
+      state: s.running ? "starting" : "done"})),
+  ];
+  const live = rows.filter(r => r.state !== "done");
+  const done = rows.filter(r => r.state === "done");
+  const open = subDoneOpen.has(a.sessionId);
+  const fold = done.length ? `<div class="sub-fold${open ? " open" : ""}"
+    data-sid="${esc(a.sessionId)}" role="button" tabindex="0"
+    title="${open ? "Hide" : "Show"} the sub-agents that have finished">
+    <span class="fold-caret">▸</span>${done.length} finished${
+      open ? "" : ` · ${esc(done.slice(0, 2).map(r => r.name).join(", "))}${
+        done.length > 2 ? "…" : ""}`}
+  </div>${open ? done.map(subRowHtml).join("") : ""}` : "";
   return `<div class="section">
     <div class="section-title">Sub-agents
       <span class="when">run inside this session — no pet of their own</span></div>
-    <div class="sub-list">${rows}</div>
+    <div class="sub-list">${live.map(subRowHtml).join("")}${fold}</div>
   </div>`;
 }
 
@@ -986,12 +1164,15 @@ function cardHtml(a) {
   // made the shelf look like two kinds of card rather than one. Who launched it
   // is said in words on the card ("from ↳ parent", with the parent's pet), so
   // nothing is lost by letting them all look alike.
-  return `<div class="card tama ${esc(a.state)}" data-sid="${esc(a.sessionId)}"
+  return `<div class="card tama ${esc(a.state)}${a.starred ? " starred" : ""}" data-sid="${esc(a.sessionId)}"
     style="--pet-accent:${accent};--card-tint:${accent}">
+    ${a.starred ? `<span class="sparkles" aria-hidden="true"><i></i><i></i><i></i></span>` : ""}
     <div class="tama-screen">
       <div class="tama-top">
         <span class="state-ico ${esc(a.state)}" title="${STATE_LABEL[a.state] || ""}">${STATE_ICON[a.state] || "○"}</span>
         <span class="agent-name" title="${esc(a.name)} — click to open, rename inside">${esc(a.display_name || a.name)}</span>
+        ${a.tmux ? `<span class="tmux-name" title="tmux session — attach with:  tmux attach -t ${esc(a.tmux.session)}">⧉ ${esc(a.tmux.session)}</span>` : ""}
+        ${a.tag ? `<span class="tag-pip" title="Tagged “${esc(a.tag)}”">#${esc(a.tag)}</span>` : ""}
         ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
         ${drafts[a.sessionId] ? `<span class="draft-pip" title="Unsent message waiting here: ${esc(drafts[a.sessionId].slice(0, 120))}">draft</span>` : ""}
         ${a.tmux ? `<button class="model-tag" data-target="${esc(a.tmux.target)}"
@@ -1025,6 +1206,7 @@ function cardHtml(a) {
     </div>
     <div class="tama-foot">
       ${modeChipHtml(a)}
+      ${dupTagHtml(a)}
       ${a.tmux ? `<span class="tmux-tag"
          title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>`
        : a.remote ? `<span class="tmux-tag remote"
@@ -1201,13 +1383,16 @@ let lastChatKey = "";
    markup first and leave the DOM completely alone when nothing changed. */
 let lastBodyHtml = "";
 
+/* A Task sub-agent has a transcript and nothing else — no pane, no tasks, no
+   MCP of its own — so it gets the two tabs that mean anything and no more. */
 const TABS = [
   {id: "overview", label: "Overview", show: () => true},
-  {id: "graph", label: "Work graph", show: a => !a.dead && !!agentGraph(a)},
+  {id: "graph", label: "Work graph", show: a => !a.dead && !a.subagent && !!agentGraph(a)},
   {id: "exchange", label: "Exchange",
-   show: a => a.dead || a.last_prompt || a.last_assistant || a.state === "needs_input"},
-  {id: "artifacts", label: "Artifacts", show: a => !a.dead},
-  {id: "mcp", label: "MCP", show: a => !a.dead && (a.mcp || []).length > 0},
+   show: a => a.dead || a.subagent || a.last_prompt || a.last_assistant
+              || a.state === "needs_input"},
+  {id: "artifacts", label: "Artifacts", show: a => !a.dead && !a.subagent},
+  {id: "mcp", label: "MCP", show: a => !a.dead && !a.subagent && (a.mcp || []).length > 0},
 ];
 
 function tabbarHtml(a) {
@@ -1313,46 +1498,18 @@ async function copyText(text, btn) {
   }
 }
 
-function lastExchangeHtml(a) {
-  // Prefer the live chat tail — the recent messages, tool calls and thinking,
-  // i.e. what the model is doing now.
-  let msgs;
-  if (chat.sid === a.sessionId && chat.messages && chat.messages.length) {
-    const all = chat.messages;
-    // Anchor on your last message so it stays visible, then show the response
-    // after it; if that's long, keep your message + the recent tail with a marker.
-    let lu = -1;
-    for (let i = all.length - 1; i >= 0; i--) if (all[i].role === "user") { lu = i; break; }
-    if (lu >= 0) {
-      const turn = all.slice(lu);
-      const TAIL = 11;
-      msgs = turn.length > TAIL + 1
-        ? [turn[0], {role: "gap", count: turn.length - 1 - TAIL}, ...turn.slice(-TAIL)]
-        : turn;
-    } else {
-      msgs = all.slice(-10);
-    }
-  } else {
-    // Until /api/chat lands (a fraction of a second), show the two-line preview
-    // the board already carries.
-    msgs = [];
-    if (a.last_prompt) msgs.push({role: "user", text: a.last_prompt});
-    if (a.last_assistant) msgs.push({role: "assistant", text: a.last_assistant});
-  }
-  const working = workingStripHtml(a);
-  if (!msgs.length && !working) return "";
-  return `<div class="section">
-    <div class="section-title">Last exchange</div>
-    <div class="chat">${petDefsHtml(a)}${
-      renderChatEntries(a, withPending(a, msgs))}${working}</div></div>`;
-}
-
+/* Only ever an agent's own written status. It used to fall back to the last
+   assistant message and call that a "Summary", which it is not — that is the
+   end of the conversation, already shown properly in the Exchange. Nothing
+   writes this file unless an agent chooses to, so most sessions show nothing
+   here, which is the honest answer. */
 function summarySectionHtml(a) {
+  const summary = a.agent_status && a.agent_status.summary;
+  if (!summary) return "";
   return `<div class="section">
-    <div class="section-title">Summary
-      ${a.agent_status ? `<span class="when">updated ${ago(a.agent_status.updated)}</span>`
-                       : `<span class="when">from transcript</span>`}</div>
-    <div class="summary-box">${mdHtml(a.agent_status?.summary || a.last_assistant || "No summary yet.")}</div>
+    <div class="section-title">Status
+      <span class="when">written by the agent, ${ago(a.agent_status.updated)}</span></div>
+    <div class="summary-box">${mdHtml(summary)}</div>
   </div>`;
 }
 
@@ -1364,10 +1521,15 @@ function detailsSectionHtml(a) {
     ["Path", a.cwd],
     ["Repo", a.git ? `${a.git.repo}${a.git.worktree ? ` (worktree ${a.git.worktree})` : ""}`
                      + ` · ${a.git.branch} @ ${a.git.commit}` : "—"],
-    ["tmux", a.tmux ? a.tmux.target : a.remote ? "on another machine" : "not found"],
+    ["tmux", (a.tmux ? a.tmux.target : a.remote ? "on another machine" : "not found")
+      + ((a.also_held_in || []).length
+         ? ` · also open in ${a.also_held_in.join(", ")}` : "")],
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
+    // The one row here that is a measurement rather than a fact, so its numbers
+    // are coloured like every other token count on the page.
     ["Context", a.context_tokens
-      ? `${a.context_tokens.toLocaleString()} of ${(a.context_window || 0).toLocaleString()} tokens`
+      ? {html: `<span class="tok">${a.context_tokens.toLocaleString()}</span> of <span
+          class="tok">${(a.context_window || 0).toLocaleString()}</span> tokens`}
       : "–"],
     ["Launched by", a.spawned_by || "started on its own"],
     ["Spawned", (a.spawns || []).length ? a.spawns.join(", ") : "–"],
@@ -1381,7 +1543,72 @@ function detailsSectionHtml(a) {
   return `<div class="section">
     <div class="section-title">Details</div>
     <dl class="details">${rows.map(([k, v]) =>
-      `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+      `<dt>${k}</dt><dd>${v && v.html ? v.html : esc(v)}</dd>`).join("")}</dl>
+  </div>`;
+}
+
+/* A shallow look at the folder the agent is working in.
+
+   Deliberately not a file browser: the server refuses to list more than two
+   levels below the agent's own cwd, and nothing is read until you open it. One
+   directory listing per open folder, cached for as long as the card is — so
+   sitting on the Overview of a busy agent costs nothing per poll, and closing a
+   folder costs nothing at all. */
+const treeCache = new Map();   // "<sid>\n<sub>" → {entries, truncated} | {loading} | {error}
+const treeOpen = new Set();    // "<sid>\n<sub>" of the folders you unfolded
+
+async function loadTree(sid, sub) {
+  const key = sid + "\n" + sub;
+  if (treeCache.has(key)) return;
+  treeCache.set(key, {loading: true});
+  try {
+    const d = await (await fetch(
+      `/api/tree?sid=${encodeURIComponent(sid)}&sub=${encodeURIComponent(sub)}`,
+      {headers: authHeaders()})).json();
+    treeCache.set(key, d.error ? {error: d.error}
+                               : {entries: d.entries || [], truncated: !!d.truncated});
+  } catch {
+    treeCache.set(key, {error: "could not read this folder"});
+  }
+  if (openSid === sid && activeTab === "overview") renderModal();
+}
+
+function treeRowsHtml(sid, sub, depth) {
+  const node = treeCache.get(sid + "\n" + sub);
+  if (!node || node.loading) {
+    if (!node) loadTree(sid, sub);
+    return `<div class="tree-note" style="--d:${depth}">reading…</div>`;
+  }
+  if (node.error) return `<div class="tree-note" style="--d:${depth}">${esc(node.error)}</div>`;
+  if (!node.entries.length) return `<div class="tree-note" style="--d:${depth}">empty</div>`;
+  const rows = node.entries.map(e => {
+    const child = sub ? `${sub}/${e.name}` : e.name;
+    if (!e.dir) {
+      return `<div class="tree-row file" style="--d:${depth}">
+        <span class="tree-caret"></span><span class="tree-name">${esc(e.name)}</span></div>`;
+    }
+    const open = e.open && treeOpen.has(sid + "\n" + child);
+    // A folder at the depth limit is still drawn — you just can't open it, and
+    // its caret says so rather than looking like a click that did nothing.
+    return `<div class="tree-row dir${e.open ? " can-open" : " deep"}${open ? " open" : ""}"
+      style="--d:${depth}"${e.open ? ` data-sub="${esc(child)}"` : ""}
+      title="${e.open ? esc(child) : "too deep to open from here"}">
+      <span class="tree-caret">${e.open ? "▸" : "·"}</span>
+      <span class="tree-name">${esc(e.name)}/</span></div>`
+      + (open ? treeRowsHtml(sid, child, depth + 1) : "");
+  }).join("");
+  return rows + (node.truncated
+    ? `<div class="tree-note" style="--d:${depth}">… more, not shown</div>` : "");
+}
+
+function treeSectionHtml(a) {
+  // A sub-agent is not on the server's agent list, so /api/tree can't serve
+  // it — and its folder is its parent's anyway, browsable from the parent.
+  if (!a.cwd || a.remote || a.subagent) return "";
+  return `<div class="section">
+    <div class="section-title">Files
+      <span class="when">${esc(a.cwd)}</span></div>
+    <div class="tree" data-sid="${esc(a.sessionId)}">${treeRowsHtml(a.sessionId, "", 0)}</div>
   </div>`;
 }
 
@@ -1396,15 +1623,22 @@ function overviewTab(a) {
     out.push(`<div class="section"><div class="notif">⚠ ${esc(a.notification || "Needs your approval")}</div>
       ${detail}${approvalActionsHtml(a)}</div>`);
   }
-  if (a.activity) {
+  // What it is doing right now, once. This used to be an activity line here and
+  // a walking pet at the foot of the old "Last exchange" section, which said the
+  // same thing twice — and the strip also covers the case the line cannot: a
+  // long reply streams with no spinner at all.
+  const working = workingStripHtml(a);
+  if (working) out.push(`<div class="section"><div class="chat">${petDefsHtml(a)}${working}</div></div>`);
+  else if (a.activity) {
     out.push(`<div class="section"><div class="card-activity big"><span class="spin-dot"></span>${esc(a.activity)}</div></div>`);
   }
-  out.push(summarySectionHtml(a));
+  // Agents first, then how much rope it has, then the facts, then context.
   out.push(subagentsSectionHtml(a));
+  out.push(summarySectionHtml(a));
   out.push(modeSelectorHtml(a));
   out.push(detailsSectionHtml(a));
+  out.push(treeSectionHtml(a));
   out.push(contextDetailHtml(a));
-  out.push(lastExchangeHtml(a));
   return out.join("");
 }
 
@@ -1430,12 +1664,12 @@ let chatStamp = null;
    it, or the board says it moved since we did. */
 function chatIsStale(sid) {
   if (chat.sid !== sid) return true;
-  const open = agents.find(x => x.sessionId === sid);
+  const open = allPets().find(x => x.sessionId === sid);
   return !open || open.last_activity !== chatStamp;
 }
 
 async function loadChat(sid) {
-  const stamp = (agents.find(x => x.sessionId === sid) || {}).last_activity ?? null;
+  const stamp = (allPets().find(x => x.sessionId === sid) || {}).last_activity ?? null;
   try {
     const res = await fetch(`/api/chat?sid=${encodeURIComponent(sid)}`,
       {headers: authHeaders()});
@@ -1709,6 +1943,11 @@ function modalHeadHtml(a) {
     <span class="name-holder">
       <span class="agent-name" title="${esc(a.name)}">${esc(a.display_name || a.name)}</span>
       <button class="rename-btn" title="Rename this pet">✎</button>
+      ${starBtnHtml(a)}
+      <button class="tag-btn${a.tag ? " on" : ""}" data-sid="${esc(a.sessionId)}"
+        title="${a.tag ? `Tagged “${esc(a.tag)}” — click to change` :
+          "Tag this pet. Pets sharing a tag are grouped; starred ones lead, the rest sit beside them."}"
+        >${a.tag ? `#${esc(a.tag)}` : "+ tag"}</button>
     </span>
     ${a.tmux
       ? `<button class="model-tag" data-target="${esc(a.tmux.target)}" style="color:${model.outline}"
@@ -1728,6 +1967,11 @@ function modalHeadHtml(a) {
 }
 
 function composerHtml(a) {
+  if (a.subagent) {
+    return `<div class="composer"><span class="composer-note">A Task sub-agent: it runs
+      inside ${esc(a.parent_name || "its parent")}, with no pane of its own. You can read
+      what it did; talk to the parent to steer it.</span></div>`;
+  }
   if (a.remote) {
     return `<div class="composer"><span class="composer-note">This agent runs on another machine — visible here, but there's no pane to send input to.</span></div>`;
   }
@@ -1754,7 +1998,7 @@ function composerHtml(a) {
    and shut itself, which looked exactly like the agent dying. It is the same
    process throughout, so the pid is what identifies it across the swap. */
 function currentAgent() {
-  const found = agents.find(x => x.sessionId === openSid)
+  const found = allPets().find(x => x.sessionId === openSid)
              || history.find(x => x.sessionId === openSid);
   if (found) return found;
   const sameProc = openPid && agents.find(x => x.pid === openPid);
@@ -1795,6 +2039,35 @@ async function loadHistory() {
     history = (d.sessions || []).map(graveAgent);
     render();
   } catch { /* the next refresh retries */ }
+}
+
+/* Edit a pet's tag in place, the same way renaming works: the poll must leave
+   the header alone while the input is open, or it would be yanked mid-word. */
+function startTagEdit(btn) {
+  const a = currentAgent();
+  if (!a) return;
+  editingName = true;   // same guard: it pauses the header re-render
+  lastHeadHtml = "";
+  const cur = a.tag || "";
+  btn.outerHTML = `<input class="tag-input" maxlength="24" placeholder="tag"
+    value="${esc(cur)}">`;
+  const inp = modal.querySelector(".tag-input");
+  if (!inp) { editingName = false; return; }
+  inp.focus();
+  inp.select();
+  const done = async (save) => {
+    if (!editingName) return;   // already handled (blur fires after Enter)
+    editingName = false;
+    if (save) await post("/api/mark", {sid: a.sessionId, tag: inp.value});
+    tick();
+    renderModal();
+  };
+  inp.addEventListener("keydown", e => {
+    e.stopPropagation();
+    if (e.key === "Enter") done(true);
+    else if (e.key === "Escape") done(false);
+  });
+  inp.addEventListener("blur", () => done(true));
 }
 
 function startRename() {
@@ -2020,6 +2293,10 @@ function openModal(sid) {
   chat = {sid: null, messages: null, error: null};
   chatStamp = null;
   arts = {sid: null, files: [], sources: [], open: [], texts: {}, error: null};
+  // Folders change under the agent's feet, so each opening of a card re-reads
+  // them. Which folders you had unfolded is kept — that is your place in the
+  // tree, not data.
+  treeCache.clear();
   browseDir = null;
   overlay.classList.remove("hidden");
   renderModal();
@@ -2045,6 +2322,100 @@ const GROUPS = [
   {id: "working", label: "Working", states: ["busy"]},
   {id: "idle", label: "Idle", states: ["idle"]},
 ];
+
+/* ---------- tag clusters ----------
+
+   A pet carries at most one tag. When two or more pets share a tag and at
+   least one of them is starred, they are drawn as a cluster: the starred ones
+   full size, the rest as small cards beside them — the same shape as a family
+   plot in the cemetery.
+
+   One exception, and it is the important one: a satellite that needs approval
+   or is waiting on you is pulled back out to full size in its own group. The
+   board exists to surface what needs answering, so nothing that does may be
+   shrunk into the margin of someone else's cluster. */
+/* Shelf controls: which pets to show, and whether to cluster them at all.
+   Kept in localStorage so the board comes back the way you left it. */
+let liveFilter = {tag: "", starredOnly: false, group: true};
+try { Object.assign(liveFilter, JSON.parse(localStorage.tamaLive || "{}")); }
+catch { /* private mode: the defaults are fine */ }
+function saveLiveFilter() {
+  try { localStorage.tamaLive = JSON.stringify(liveFilter); } catch { /* ignore */ }
+}
+
+/* The pets the shelf should show. Filtering happens before grouping, so a tag
+   filter narrows the board to that tag's cluster and nothing else. */
+function visibleAgents(list) {
+  return list.filter(a => (!liveFilter.tag || a.tag === liveFilter.tag)
+                       && (!liveFilter.starredOnly || a.starred));
+}
+
+/* A Task sub-agent, dressed as a pet so the ordinary card and popup code can
+   draw it. It inherits the parent's model (so the hat matches, which is true —
+   a fork runs the same model) and its folder (so the body colour matches too).
+   It has no pane and never will: it lives inside the parent's process. */
+function subAgentPet(r, parent) {
+  return {
+    sessionId: r.sessionId, name: r.name, display_name: r.name,
+    cwd: r.cwd, project: parent ? parent.project : null,
+    git: r.branch ? {repo: (parent && parent.git) ? parent.git.repo : null,
+                     branch: r.branch, commit: null} : null,
+    state: r.running ? "busy" : "idle",
+    subagent: true, parent: r.parent, parent_name: parent ? displayName(parent) : null,
+    title: r.title, last_assistant: r.title,
+    startedAt: r.started, last_activity: r.last_activity,
+    tmux: null, remote: false, dead: !r.running, tasks: [], subagents: [],
+    context_breakdown: parent ? parent.context_breakdown : null,
+    starred: false, tag: null,
+  };
+}
+const displayName = a => a.display_name || a.name;
+
+/* Every pet the board knows about, real agents and sub-agents alike — the
+   popup looks its subject up here. */
+let subPets = [];
+function allPets() { return agents.concat(subPets); }
+
+const NEEDS_YOU = ["needs_input", "waiting"];
+const URGENCY = {needs_input: 3, waiting: 2, busy: 1, idle: 0};
+
+function tagClusters(list) {
+  const byTag = new Map();
+  for (const a of list) {
+    if (!a.tag) continue;
+    if (!byTag.has(a.tag)) byTag.set(a.tag, []);
+    byTag.get(a.tag).push(a);
+  }
+  const clusters = [];
+  const claimed = new Set();
+  for (const [tag, members] of byTag) {
+    const stars = members.filter(m => m.starred);
+    // Alone in its tag, or nobody starred: there is no primary to gather
+    // around, so leave every member as an ordinary card.
+    if (members.length < 2 || !stars.length) continue;
+    const satellites = members.filter(m => !m.starred && !NEEDS_YOU.includes(m.state));
+    if (!satellites.length) continue;  // nothing to shrink; keep it simple
+    stars.forEach(m => claimed.add(m.sessionId));
+    satellites.forEach(m => claimed.add(m.sessionId));
+    // The cluster sits wherever its most urgent starred member would sort.
+    const lead = stars.reduce((x, y) => (URGENCY[y.state] > URGENCY[x.state] ? y : x));
+    clusters.push({tag, stars, satellites, state: lead.state,
+                   key: "cluster:" + tag});
+  }
+  return {clusters, claimed};
+}
+
+/* The shelf's clusters: tag groups, and nothing else.
+
+   Task sub-agents used to form clusters of their own and to be folded into a
+   parent's tag cluster as extra satellites. Both put a read-only record beside
+   real, drivable sessions in the same shape, and the second also relabelled the
+   box as the tag, so the sub-agents stopped reading as sub-agents at all. The
+   shelf now shows only sessions you can act on; a parent says how many
+   sub-agents it ran (see subagentsHtml) and lists them in its popup. */
+function shelfClusters(list) {
+  return tagClusters(list);
+}
 
 const GRAVE_CONTROLS = ["grave-search", "grave-model", "grave-repo",
                         "grave-min", "grave-max", "grave-sort"];
@@ -2104,6 +2475,7 @@ function render(force) {
     counts.innerHTML = countsHtml;
     lastCountsHtml = countsHtml;
   }
+  refreshTagOptions();
   // Don't yank an open picker, text you're in the middle of selecting, or a
   // cemetery dropdown someone has open. Everything outside the grid refreshes.
   // The picker now lives in <body>, not inside the card, so look for it there —
@@ -2111,10 +2483,19 @@ function render(force) {
   if (!document.querySelector(".model-menu") && !hasSelectionIn(grid)
       && (force || !graveFilterFocused())) {
     const parts = [];  // [key, html] in shelf order — see paintGrid
-    if (agents.length) {
+    const shelf = visibleAgents(agents);
+    // Pets gathered into a tag cluster are drawn by the cluster, not on their
+    // own; everyone else (untagged, alone in a tag, or pulled out of one
+    // because they need you) is an ordinary card in their own state group.
+    // With grouping off, nothing clusters and every card is the same size.
+    const {clusters, claimed} = liveFilter.group
+      ? shelfClusters(shelf) : {clusters: [], claimed: new Set()};
+    if (shelf.length) {
       for (const g of GROUPS) {
-        const list = agents.filter(a => g.states.includes(a.state));
-        if (!list.length) continue;
+        const inGroup = shelf.filter(a => g.states.includes(a.state));
+        const list = inGroup.filter(a => !claimed.has(a.sessionId));
+        const here = clusters.filter(c => g.states.includes(c.state));
+        if (!list.length && !here.length) continue;
         // Most recent exchange first. Sorted on last_activity (the newest
         // timestamped record) rather than the transcript's file mtime, which
         // Claude Code bumps on week-old conversations for its own bookkeeping
@@ -2124,11 +2505,15 @@ function render(force) {
           list.sort((x, y) => (y.last_activity || 0) - (x.last_activity || 0));
         parts.push([`head:${g.id}`, `<div class="group-head ${g.id}">
             <span class="group-label">${g.label}</span>
-            <span class="group-count">${list.length}</span>
+            <span class="group-count">${inGroup.length}</span>
             <span class="group-rule"></span>
           </div>`]);
+        for (const c of here) parts.push([c.key, clusterHtml(c)]);
         for (const a of list) parts.push([`card:${a.sessionId}`, cardHtml(a)]);
       }
+    } else if (agents.length) {
+      parts.push(["empty", `<div class="empty">No pet matches this filter.<br>
+        Clear it in the header to see all ${agents.length}.</div>`]);
     } else {
       parts.push(["empty", `<div class="empty">No agents running yet.<br>Start one with <b>+ New agent</b>.</div>`]);
     }
@@ -2155,6 +2540,46 @@ function render(force) {
   document.title = agents.some(a => a.state === "needs_input")
     ? "⚠ TamaClaudchi" : "TamaClaudchi";
   if (openSid) renderModal();
+}
+
+/* ---------- shelf controls ---------- */
+const liveTagSel = document.getElementById("live-tag");
+const liveStarredBox = document.getElementById("live-starred");
+const liveGroupBox = document.getElementById("live-group");
+
+/* Refill the tag dropdown only when the set of tags in use actually changes —
+   rewriting a <select> shuts it while someone is choosing from it. */
+let lastTagOptions = "";
+function refreshTagOptions() {
+  if (!liveTagSel) return;
+  const tags = [...new Set(agents.map(a => a.tag).filter(Boolean))].sort();
+  // A tag you have filtered to must stay selectable even if its last pet just
+  // ended, or the board would go blank with no way back.
+  if (liveFilter.tag && !tags.includes(liveFilter.tag)) tags.push(liveFilter.tag);
+  const html = `<option value="">all tags</option>`
+    + tags.map(t => `<option value="${esc(t)}">#${esc(t)}</option>`).join("");
+  if (html !== lastTagOptions) {
+    liveTagSel.innerHTML = html;
+    lastTagOptions = html;
+  }
+  if (liveTagSel.value !== liveFilter.tag) liveTagSel.value = liveFilter.tag;
+}
+
+if (liveTagSel) {
+  liveStarredBox.checked = liveFilter.starredOnly;
+  liveGroupBox.checked = liveFilter.group;
+  liveTagSel.addEventListener("change", () => {
+    liveFilter.tag = liveTagSel.value;
+    saveLiveFilter();
+    render(true);
+  });
+  for (const [box, key] of [[liveStarredBox, "starredOnly"], [liveGroupBox, "group"]]) {
+    box.addEventListener("change", () => {
+      liveFilter[key] = box.checked;
+      saveLiveFilter();
+      render(true);
+    });
+  }
 }
 
 /* ---------- theme switch ---------- */
@@ -2351,6 +2776,21 @@ document.body.addEventListener("click", e => {
     startRename();
     return;
   }
+  const star = e.target.closest(".star-btn");
+  if (star) {
+    e.stopPropagation();  // don't open the pet as well
+    const on = star.classList.contains("on");
+    star.classList.toggle("on");          // answer the click immediately
+    star.textContent = on ? "☆" : "★";
+    post("/api/mark", {sid: star.dataset.sid, star: !on}).then(tick);
+    return;
+  }
+  const tagBtn = e.target.closest(".tag-btn");
+  if (tagBtn) {
+    e.stopPropagation();
+    startTagEdit(tagBtn);
+    return;
+  }
   const rev = e.target.closest(".revive-btn");
   if (rev) {
     e.stopPropagation();
@@ -2385,6 +2825,31 @@ document.body.addEventListener("click", e => {
     closeModal();
     return;
   }
+  // Unfold the sub-agents that have already finished.
+  const fold = e.target.closest(".sub-fold");
+  if (fold && fold.dataset.sid) {
+    e.stopPropagation();
+    const sid = fold.dataset.sid;
+    subDoneOpen.has(sid) ? subDoneOpen.delete(sid) : subDoneOpen.add(sid);
+    renderModal();
+    return;
+  }
+  // A folder in the file tree.
+  const dir = e.target.closest(".tree-row.can-open");
+  if (dir && dir.dataset.sub) {
+    e.stopPropagation();
+    const key = (dir.closest(".tree").dataset.sid) + "\n" + dir.dataset.sub;
+    treeOpen.has(key) ? treeOpen.delete(key) : treeOpen.add(key);
+    renderModal();
+    return;
+  }
+  // A sub-agent row in the popup opens that sub-agent's own transcript.
+  const subRow = e.target.closest(".sub-row.open");
+  if (subRow && subRow.dataset.sid) {
+    e.stopPropagation();
+    openModal(subRow.dataset.sid);
+    return;
+  }
   const tab = e.target.closest(".tab");
   if (tab) {
     activeTab = tab.dataset.tab;
@@ -2407,7 +2872,7 @@ document.body.addEventListener("click", e => {
     return;
   }
   // A drag that ends on a card is a text selection, not a click on the card.
-  const card = e.target.closest(".card, .grave-card");
+  const card = e.target.closest(".card, .grave-card, .mini-card");
   if (card && !hasSelectionIn(card)) openModal(card.dataset.sid);
 });
 
@@ -2543,6 +3008,8 @@ async function tick() {
     }
     const data = await res.json();
     agents = data.agents || [];
+    subPets = (data.subagents || [])
+      .map(r => subAgentPet(r, agents.find(a => a.sessionId === r.parent)));
     spawnDir = data.spawn_dir || spawnDir;
     me = data.user || me;
     baselineUnseen();  // never-met sessions start "seen", not "new"

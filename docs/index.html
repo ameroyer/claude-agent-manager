@@ -61,6 +61,7 @@ state and the card saying so, so keep the cache below the poll.</p>
   <tr><td><code>~/.claude/sessions/&lt;pid&gt;.json</code></td><td>registry: pid, sessionId, cwd, status</td></tr>
   <tr><td><code>tmux list-panes</code> + <code>ps</code></td><td>which pane each agent pid lives in</td></tr>
   <tr><td><code>~/.claude/projects/&lt;slug&gt;/&lt;sid&gt;.jsonl</code></td><td>transcript: chat, model, tokens, title, MCP tools</td></tr>
+  <tr><td><code>…/&lt;sid&gt;/subagents/agent-&lt;id&gt;.jsonl</code></td><td>a Task sub-agent's own transcript</td></tr>
   <tr><td><code>~/.claude/tasks/&lt;sid&gt;/*.json</code></td><td>task list and dependency edges</td></tr>
   <tr><td><code>~/.claude/agent-events/&lt;sid&gt;.jsonl</code></td><td>hook events (optional)</td></tr>
   <tr><td><code>~/.claude.json</code></td><td>MCP servers configured per directory</td></tr>
@@ -69,7 +70,8 @@ state and the card saying so, so keep the cache below the poll.</p>
 <p>Written state, all user-owned and written atomically:
 <code>agent-manager-names.json</code> (renames),
 <code>agent-manager-artifacts.json</code> (pinned files),
-<code>agent-manager-spawns.json</code> (who launched whom).</p>
+<code>agent-manager-spawns.json</code> (who launched whom),
+<code>agent-manager-marks.json</code> (tags and stars).</p>
 
 <h2>Endpoints</h2>
 <p>All gated on the token — no exceptions.</p>
@@ -81,12 +83,17 @@ state and the card saying so, so keep the cache below the poll.</p>
   <tr><td><code>/api/artifacts</code>, <code>/api/browse</code></td><td>pinned files; path completion
       (<code>dirs=1</code> folders only, <code>base=</code> resolves a relative prefix against the
       agent's folder). Listing only — it returns names, never contents.</td></tr>
+  <tr><td><code>/api/tree</code></td><td>one directory of the agent's own working folder
+      (<code>sub=</code>, relative). Names only, never contents; refuses anything more than
+      <code>TREE_MAX_DEPTH</code> below the cwd, and resolves through symlinks before
+      checking, so a link out is refused too.</td></tr>
   <tr><td><code>/api/sessions</code>, <code>/api/debug</code></td><td>resumable sessions; why a session isn't on the board</td></tr>
   <tr><th>POST</th><th></th></tr>
   <tr><td><code>/api/send</code>, <code>/api/key</code></td><td>type into a pane; press one allowed key</td></tr>
   <tr><td><code>/api/model</code>, <code>/api/mode</code></td><td>switch model; cycle permission mode</td></tr>
   <tr><td><code>/api/spawn</code>, <code>/api/kill</code>, <code>/api/rename</code></td><td>lifecycle</td></tr>
   <tr><td><code>/api/artifact-pin</code></td><td>watch a file or folder</td></tr>
+  <tr><td><code>/api/mark</code></td><td>a pet's tag (at most one) and star</td></tr>
 </table>
 
 <h2>Security model</h2>
@@ -176,6 +183,13 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       denominator.</li>
   <li><strong>Transcript mtime is not activity.</strong> Claude Code rewrites untimestamped
       bookkeeping records; sort on the newest <em>timestamped</em> record instead.</li>
+  <li><strong>A Task sub-agent <em>does</em> keep a transcript</strong>, at
+      <code>&lt;project&gt;/&lt;parent sid&gt;/subagents/agent-&lt;id&gt;.jsonl</code> — the parent's
+      id is in the path. It has no pid and no pane (it runs inside the parent), so it can never
+      be driven, but its conversation is readable and it gets a card beside its parent. Its
+      opening prompt is often wrapped in a <code>&lt;…&gt;</code> preamble of standing
+      instructions; strip that or every fork looks identical. <code>/api/chat</code> resolves a
+      sub-agent by the path on the row the server produced, never by building one from the id.</li>
   <li><strong>A Task sub-agent's <code>tool_use</code> is only written once it finishes.</strong>
       Live ones come from the pane's agent roster (<code>●&nbsp;main</code> /
       <code>◯&nbsp;type</code>).</li>
@@ -211,6 +225,16 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       processes and walk up to their pane instead. Check the uid before reading
       <code>comm</code>: one stat against an open-read-close, and on a shared login box only 5%
       of processes were ours. Together: 67 ms → 22 ms and one fewer subprocess.</li>
+  <li><strong>One conversation can be held by several processes.</strong>
+      <code>claude --resume &lt;id&gt;</code> run again in another pane gives two live agents on
+      one transcript, and each got its own card. Two rules fix it: take the session id from the
+      process's own <code>--resume</code> argument (<code>resumed_sid</code>) rather than
+      guessing it from the newest transcript in the cwd — that guess picks a <em>stranger's</em>
+      conversation whenever several sessions share a directory — and then
+      <code>merge_duplicates</code> folds equal ids into one card that lists the other panes.
+      A <em>stated</em> id that collides is a real duplicate and is kept; a <em>guessed</em> one
+      that collides is just a bad guess and is dropped. The command line is read only for that
+      id and never appears in any response.</li>
   <li><strong>tmux daemonises</strong>, so a spawned session's process parent is the tmux
       server. Lineage must be recorded while both sessions are alive — the link comes from the
       parent's transcript (<code>_NEW_SESSION_RE</code>), matched by tmux <em>session name</em>,
@@ -290,6 +314,21 @@ selection, the caret. So:</p>
       viewport) — offsets relative to whatever container it lands in are tuned for one call
       site and silently wrong at the next.</li>
 </ul>
+
+<h2>Tags and stars</h2>
+<p>A pet carries at most <strong>one</strong> tag — that is what makes a tag a group rather
+than a filter. When two or more pets share a tag <em>and</em> at least one is starred, they are
+drawn as a cluster (<code>tagClusters</code>): the starred pets full size, the rest as small
+cards beside them, the same shape as a cemetery family plot. A pet alone in its tag, or in a
+tag nobody has starred, stays an ordinary card.</p>
+<p>One exception, and it is deliberate: <strong>a satellite that needs approval or is waiting on
+you is pulled back out to full size in its own group.</strong> The board exists to surface what
+needs answering, so nothing that does may be shrunk into the margin of someone else's cluster.
+A cluster sorts into the state group of its most urgent starred member for the same reason.</p>
+<p>Tags and stars live in <code>~/.claude/agent-manager-marks.json</code>
+(<code>{sid: {tag, star}}</code>, bounded, written atomically) and are set through
+<code>POST /api/mark</code>. The tag is free text and is only ever a JSON <em>value</em> —
+nothing builds a path from it — so it is escaped at every render rather than restricted.</p>
 
 <h2>Motion</h2>
 <p>The board is meant to be calm, and everything twitchy has been a bug report:</p>

@@ -37,6 +37,9 @@ STATUS_DIR = os.path.join(CLAUDE_DIR, "agent-status")
 NAMES_FILE = os.path.join(CLAUDE_DIR, "agent-manager-names.json")
 ARTIFACTS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-artifacts.json")
 SPAWNS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-spawns.json")
+MARKS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-marks.json")
+TAG_MAX_CHARS = 24
+MAX_MARKS = 400  # keep the file bounded; oldest entries fall off
 CLAUDE_CONFIG = os.path.join(HOME, ".claude.json")
 # realpath, not abspath: installed into a venv (uvx/pip) any parent may be a
 # symlink, and the static-file guard below compares against a realpath'd
@@ -262,6 +265,102 @@ def load_events(session_id):
 def transcript_path(cwd, session_id):
     slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     return os.path.join(PROJECTS_DIR, slug, f"{session_id}.jsonl")
+
+
+# A Task sub-agent writes its own transcript beside its parent's, at
+# <project>/<parent sid>/subagents/agent-<id>.jsonl. It has no pid and no pane —
+# it runs inside the parent process — so it can never be driven, but its
+# conversation is right there and readable.
+SUBAGENT_FRESH_SECONDS = 90
+_subagent_cache = {}
+
+
+# A sub-agent's prompt often opens with a wrapper of standing instructions
+# (`<fork-boilerplate> … </fork-boilerplate>`) before the actual directive.
+# Showing that as the title made every fork look identical.
+_BOILERPLATE_RE = re.compile(r"^\s*<([a-z][\w-]*)>.*?</\1>\s*", re.S)
+
+
+def strip_boilerplate(text):
+    """Drop a leading <tag>…</tag> preamble so the real instruction shows."""
+    out = _BOILERPLATE_RE.sub("", text or "", count=1)
+    return out.strip() or (text or "").strip()
+
+
+def list_subagents(cwd, session_id):
+    """The Task sub-agents this session has run, newest first."""
+    d = os.path.join(PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", cwd),
+                     session_id, "subagents")
+    try:
+        names = [n for n in os.listdir(d) if n.endswith(".jsonl")]
+    except OSError:
+        return []
+    out = []
+    now = time.time()
+    for name in names:
+        path = os.path.join(d, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        cached = _subagent_cache.get(path)
+        if not cached or cached[0] != mtime:
+            cached = (mtime, _read_subagent(path, name))
+            _subagent_cache[path] = cached
+        row = dict(cached[1])
+        row["parent"] = session_id
+        row["cwd"] = row.get("cwd") or cwd
+        row["running"] = now - mtime < SUBAGENT_FRESH_SECONDS
+        row["last_activity"] = row.get("last_activity") or mtime
+        out.append(row)
+    out.sort(key=lambda r: r["last_activity"], reverse=True)
+    return out[:MAX_SUBAGENT_ROWS]
+
+
+MAX_SUBAGENT_ROWS = 12
+
+
+def _read_subagent(path, name):
+    """Head for its name and task, tail for when it last spoke."""
+    row = {"sessionId": os.path.splitext(name)[0], "path": path,
+           "name": None, "title": None, "cwd": None, "branch": None,
+           "started": None, "last_activity": None}
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64 * 1024).decode("utf-8", "replace").splitlines()
+            size = os.path.getsize(path)
+            f.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return row
+    for line in head:
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        row["name"] = row["name"] or rec.get("slug")
+        row["cwd"] = row["cwd"] or rec.get("cwd")
+        row["branch"] = row["branch"] or rec.get("gitBranch")
+        row["started"] = row["started"] or iso_to_epoch(rec.get("timestamp"))
+        if row["title"] is None and rec.get("type") == "user":
+            msg = (rec.get("message") or {}).get("content")
+            if isinstance(msg, list):
+                msg = " ".join(b.get("text", "") for b in msg
+                               if isinstance(b, dict) and b.get("type") == "text")
+            if isinstance(msg, str) and msg.strip():
+                row["title"] = " ".join(strip_boilerplate(msg).split())[:120]
+        if row["name"] and row["title"] and row["started"]:
+            break
+    for line in reversed(tail):
+        try:
+            ts = json.loads(line).get("timestamp")
+        except Exception:
+            continue
+        if ts:
+            row["last_activity"] = iso_to_epoch(ts)
+            break
+    row["name"] = row["name"] or row["sessionId"]
+    return row
 
 
 def transcript_title(path):
@@ -689,10 +788,16 @@ _chat_cache = {}
 
 def load_chat(cwd, session_id):
     """Last N user/assistant messages from the transcript tail (mtime-cached)."""
-    path = transcript_path(cwd, session_id)
+    return load_chat_file(transcript_path(cwd, session_id))
+
+
+def load_chat_file(path):
+    """Same, for a transcript whose path is already known — a Task sub-agent's
+    lives at <project>/<parent sid>/subagents/, not at the usual place."""
     if not os.path.exists(path):
         return []
     mtime = os.path.getmtime(path)
+    session_id = path
     cached = _chat_cache.get(session_id)
     if cached and cached[0] == mtime:
         return cached[1]
@@ -815,6 +920,52 @@ def list_artifacts(cwd, session_id):
     return files[:ART_MAX_FILES]
 
 
+# One level of the working-directory tree, listed on demand. The depth cap is
+# what keeps this cheap and keeps the widget a glance rather than a file
+# manager: the root is depth 0, so only a folder at depth 0 or 1 can be opened,
+# and nothing below depth 2 is ever listed.
+TREE_MAX_DEPTH = 2
+TREE_MAX_ENTRIES = 80
+# Folders that are always enormous and never what you opened the tree to see.
+TREE_SKIP = {"node_modules", "__pycache__", ".git", "venv", ".venv"}
+
+
+def list_tree(root, sub=""):
+    """The entries of one directory inside `root`, dirs first, names sorted.
+
+    `sub` is relative to the agent's own working directory and is resolved
+    against it, so the endpoint can only ever read below that folder — it is not
+    a general filesystem browser. One scandir per call, nothing recursive: the
+    page asks again when you open a folder, and never for one you left shut."""
+    root = os.path.realpath(root)
+    parts = [p for p in (sub or "").split("/") if p and p != "."]
+    if len(parts) > TREE_MAX_DEPTH - 1:
+        return None, "too deep"
+    target = os.path.realpath(os.path.join(root, *parts))
+    if target != root and not target.startswith(root + os.sep):
+        return None, "outside the working directory"
+    try:
+        with os.scandir(target) as it:
+            # is_dir() follows symlinks on purpose, and the same answer sorts
+            # and draws: a link to a folder is a folder here, and opening it is
+            # where the realpath check above decides whether it stays inside.
+            rows = [(not e.is_dir(), e.name, e.is_dir())
+                    for e in it if not e.name.startswith(".")]
+    except OSError:
+        # Deliberately not the OS message: it quotes the full path back, and
+        # this is the one error the page prints verbatim.
+        return None, "cannot read this folder"
+    rows.sort(key=lambda r: (r[0], r[1].lower()))
+    depth = len(parts) + 1
+    entries = [{"name": name, "dir": isdir,
+                # Only a folder shallow enough to have a listing of its own is
+                # offered as openable; deeper ones are drawn as a dead end.
+                "open": isdir and depth < TREE_MAX_DEPTH and name not in TREE_SKIP}
+               for _, name, isdir in rows[:TREE_MAX_ENTRIES]]
+    return {"entries": entries, "sub": "/".join(parts),
+            "truncated": len(rows) > TREE_MAX_ENTRIES}, None
+
+
 def browse_paths(prefix, dirs_only=False, base_dir=None):
     """Path completions: sub-directories, plus .md/.txt files unless `dirs_only`.
 
@@ -933,6 +1084,26 @@ def derive_state(registry_status, last_event, transcript_mtime=None, working=Non
     return "busy" if registry_status == "busy" else "idle"
 
 
+def with_subagent_work(state, roster):
+    """Fold running sub-agents into the parent's state → (state, activity).
+
+    A session whose Task sub-agents are still running is not idle: the work is
+    happening inside it, it just isn't the thing typing. A sub-agent launched in
+    the background leaves the parent's own spinner off, so the pane on its own
+    reads "idle" while three agents churn under it.
+
+    Only the pane roster is allowed to flip this. It is the pane's live agent
+    list, whereas a sub-agent transcript's mtime is a guess with 90 seconds of
+    slack in it — good enough to grey out a finished row, not good enough to
+    tell you a pet is working. The attention states are left alone: an agent
+    waiting on you is still waiting on you, whatever it has running."""
+    live = len([x for x in roster if x.get("running")])
+    if not live:
+        return state, None
+    return ("busy" if state == "idle" else state,
+            f"{live} sub-agent{'' if live == 1 else 's'} working")
+
+
 def proc_start_time(pid):
     """True process start as epoch seconds (field 22 of /proc/<pid>/stat).
     The /proc dir's own mtime is NOT the start time and must not be used."""
@@ -944,6 +1115,30 @@ def proc_start_time(pid):
         return time.time() - (uptime - ticks / os.sysconf("SC_CLK_TCK"))
     except (OSError, ValueError, IndexError):
         return None
+
+
+# `claude --resume <sid>` — the argv is NUL-separated, so the id follows either
+# a NUL or an "=".
+# The id must start alphanumeric: `claude --resume` with no argument opens the
+# interactive picker, and the next argv entry there is a flag, not a session.
+_RESUME_RE = re.compile(r"--resume[\0=]([A-Za-z0-9][A-Za-z0-9-]{7,63})")
+
+
+def resumed_sid(pid):
+    """The session a process was launched to resume, read from its own command
+    line.
+
+    This is authoritative, and the alternative is not: recovering the id from
+    the newest transcript in the process's cwd picks a *different* conversation
+    whenever several sessions share a directory. With four agents in one repo
+    that mislabelled a running agent with a stranger's transcript."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    m = _RESUME_RE.search(argv)
+    return m.group(1) if m else None
 
 
 def proc_comm(pid):
@@ -995,6 +1190,13 @@ _PREVIEW_EDGE_RE = re.compile(r"\s{2,}[─-╿].*$")
 # A dialog always sits at the foot of the pane; a numbered list in the
 # conversation generally does not.
 PROMPT_TAIL_LINES = 12
+# How far above its hint line a dialog's body may reach: options, a preview
+# panel beside them, and the "Notes:" row. Generous, because it is the hint that
+# proves a dialog is open — this only bounds how far up we look for the options.
+PROMPT_BODY_LINES = 60
+# How far apart two options of the same menu may sit: adjacent, or parted by a
+# description line, a rule, or a short preview. Anything wider ends the menu.
+OPTION_GAP_LINES = 12
 
 
 # The step bar a multi-question AskUserQuestion draws above its options:
@@ -1032,21 +1234,44 @@ def detect_prompt(lines):
     *idle* while it sat blocked, and you had to go to the terminal. So accept
     any of three independent dialog tells, all absent from prose: the ❯
     selection cursor, the "Esc to cancel" hint line, or a yes-ish option."""
-    opts, cursor, last_at = {}, False, -1
-    for i, ln in enumerate(lines):
-        m = _OPTION_RE.match(ln)
-        if m:
-            opts[m.group("key")] = _PREVIEW_EDGE_RE.sub("", m.group("label")).strip()[:60]
-            cursor = cursor or "❯" in m.group("lead")
-            last_at = i
+    # A dialog's hint line is always its last line, so that — not a fixed
+    # distance from the bottom of the pane — is what bounds its options. A menu
+    # with a tall preview panel pushes them far up: a 13-line preview put the
+    # last option 18 non-blank lines from the bottom, the old 12-line window
+    # rejected the whole dialog, and the board showed nothing at all while the
+    # agent sat blocked. Options are read only from the region the hint closes.
+    hint_at = None
+    for i in range(max(0, len(lines) - PROMPT_TAIL_LINES), len(lines)):
+        if _DIALOG_HINT_RE.search(lines[i]):
+            hint_at = i
+    end = hint_at if hint_at is not None else len(lines)
+    reach = PROMPT_BODY_LINES if hint_at is not None else PROMPT_TAIL_LINES
+    start = max(0, end - reach)
+    # Read the options bottom-up and stop where this menu ends: at a key seen
+    # twice, or at a gap too wide to be one. A menu's options sit together —
+    # adjacent, or parted by a description or a rule — while a numbered list in
+    # the conversation is far above. Scanning the window top-down instead let
+    # such prose contribute a phantom extra option, since a later line only
+    # overwrites a key it shares and any others it had were kept.
+    opts, cursor, last_at, prev = {}, False, -1, None
+    for i in range(end - 1, start - 1, -1):
+        m = _OPTION_RE.match(lines[i])
+        if not m:
+            continue
+        key = m.group("key")
+        if key in opts or (prev is not None and prev - i > OPTION_GAP_LINES):
+            break
+        opts[key] = _PREVIEW_EDGE_RE.sub("", m.group("label")).strip()[:60]
+        cursor = cursor or "❯" in m.group("lead")
+        last_at = max(last_at, i)
+        prev = i
     keys = sorted(opts)
     if len(keys) < 2 or keys != [str(i) for i in range(1, len(keys) + 1)]:
         return None
-    if last_at < len(lines) - PROMPT_TAIL_LINES:
-        return None  # too far up the pane to be a live dialog
+    if last_at < 0:
+        return None
     has_yes = any("yes" in v.lower() for v in opts.values())
-    hint = any(_DIALOG_HINT_RE.search(ln) for ln in lines[-PROMPT_TAIL_LINES:])
-    if not (cursor or hint or has_yes):
+    if not (cursor or hint_at is not None or has_yes):
         return None
     question = None
     for ln in lines:  # last text line before the options is the question
@@ -1242,10 +1467,11 @@ def discover_remote_regs(seen_sids):
 def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
     """Fallback for when ~/.claude/sessions is missing entries (it can be reset
     while sessions keep running): synthesize registry records for live `claude`
-    processes that sit in a tmux pane, recovering the session id from the
-    newest transcript in their cwd."""
+    processes that sit in a tmux pane, taking the session id from the process's
+    own `--resume` argument, or failing that from the newest transcript in its
+    cwd. Adds every id it claims to `seen_sids`, so remote discovery does not
+    then surface the same session a second time."""
     uid = os.getuid()
-    seen_sids = set(seen_sids)
     out = []
     for pid in pid_to_pane:
         if pid in seen_pids or proc_comm(pid) != "claude":
@@ -1265,9 +1491,18 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
         # a momentary miss would hand a running agent back its "new-<pid>"
         # placeholder — the card changes identity, which reads as the agent
         # dying and a stranger taking its place.
-        sid = newest_session_id(cwd, since=started) or _sid_by_pid.get(pid)
-        if sid in seen_sids:
-            continue
+        # A resumed process names its own session on its command line; only
+        # guess when it doesn't.
+        sid = resumed_sid(pid)
+        stated = bool(sid)
+        if not sid:
+            sid = newest_session_id(cwd, since=started) or _sid_by_pid.get(pid)
+        if sid in seen_sids and not stated:
+            continue  # a guessed id that collides is simply a bad guess
+        # A *stated* id that collides is the interesting case: you resumed a
+        # conversation that was already open in another pane. Keep it, so
+        # merge_duplicates can fold it into one card that says where else it
+        # is held, rather than silently dropping a real second agent.
         recent = False
         if sid:
             _sid_by_pid[pid] = sid
@@ -1279,9 +1514,12 @@ def discover_live_regs(pid_to_pane, seen_pids, seen_sids):
             # No transcript newer than this process: either a brand-new
             # conversation, or a `--resume` that hasn't written yet.
             sid = f"new-{pid}"
-        seen_sids.add(sid)
+        seen_sids.add(sid)  # so remote discovery doesn't claim it as well
         out.append({"pid": pid, "sessionId": sid, "cwd": cwd,
                     "status": "busy" if recent else "idle",
+                    # Claude Code did not write this record, we inferred it —
+                    # so it loses to a real registry entry for the same session.
+                    "synthesized": True,
                     "name": os.path.basename(cwd.rstrip("/")) or cwd,
                     "nameSource": "derived", "statusUpdatedAt": None,
                     "startedAt": started})
@@ -1349,6 +1587,44 @@ def load_names():
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
 
 
+def load_marks():
+    """{sid: {"tag": str, "star": bool}} — the labels you put on a pet.
+
+    A pet carries at most ONE tag, which is what makes a tag a group rather
+    than a filter: pets sharing a tag are shown together, the starred ones full
+    size and the rest as small cards beside them."""
+    marks = read_json(MARKS_FILE)
+    return marks if isinstance(marks, dict) else {}
+
+
+def set_mark(session_id, tag=None, star=None):
+    """Set a pet's tag and/or star. `tag=""` clears the tag; passing None for
+    either leaves it alone. An entry with neither is dropped entirely."""
+    if not _SESSION_ID_RE.fullmatch(session_id or ""):
+        return False, "bad session id"
+    marks = load_marks()
+    entry = dict(marks.get(session_id) or {})
+    if tag is not None:
+        tag = re.sub(r"\s+", " ", str(tag)).strip()[:TAG_MAX_CHARS]
+        entry["tag"] = tag
+    if star is not None:
+        entry["star"] = bool(star)
+    if not entry.get("tag") and not entry.get("star"):
+        marks.pop(session_id, None)
+    else:
+        marks[session_id] = {k: v for k, v in entry.items() if v}
+    if len(marks) > MAX_MARKS:
+        marks = dict(list(marks.items())[-MAX_MARKS:])
+    try:
+        with open(MARKS_FILE + ".tmp", "w") as f:
+            json.dump(marks, f)
+        os.replace(MARKS_FILE + ".tmp", MARKS_FILE)  # atomic — no torn writes
+    except Exception as e:
+        return False, str(e)
+    _cache["t"] = 0.0  # show it on the next poll
+    return True, "marked"
+
+
 def set_name(session_id, name):
     """Persist a user-chosen display name for a session (empty clears it).
 
@@ -1374,7 +1650,7 @@ def set_name(session_id, name):
     return True, name or "cleared"
 
 
-def build_agent(reg, pid_to_pane, names=None, captures=None):
+def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
     sid = reg.get("sessionId", "")
     cwd = reg.get("cwd", "")
     pane = pid_to_pane.get(reg["pid"])
@@ -1389,6 +1665,7 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
     last_activity = tinfo["last_activity"] or tinfo["mtime"]
     state = derive_state(reg.get("status"), last_event, last_activity,
                          pstatus["working"], pstatus["prompt"])
+    state, sub_activity = with_subagent_work(state, pstatus["subagents"])
     notif_msg = None
     if last_event and last_event.get("event") == "notification" and state in ("needs_input", "waiting"):
         notif_msg = last_event.get("message")
@@ -1425,6 +1702,9 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
         "startedAt": reg.get("startedAt"),
         "tmux": pane,
         "remote": bool(reg.get("remote")),
+        "tag": (marks or {}).get(sid, {}).get("tag") or None,
+        "starred": bool((marks or {}).get(sid, {}).get("star")),
+        "_synth": bool(reg.get("synthesized")),  # dropped by merge_duplicates
         "tasks": tasks,
         "current_task": in_progress[0]["activeForm"] if in_progress else None,
         "notification": notif_msg,
@@ -1442,7 +1722,7 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
         "context_window": ctx_window if ctx_tokens else None,
         "context_breakdown": tinfo["context_breakdown"],
         "permission_mode": pstatus["mode"] or tinfo["permission_mode"],
-        "activity": pstatus["activity"] if state == "busy" else None,
+        "activity": (pstatus["activity"] or sub_activity) if state == "busy" else None,
         "progress": pstatus["progress"] if state == "busy" else None,
         "pending_tool": tinfo["pending_tool"] if state == "needs_input" else None,
         "subagents": pstatus["subagents"] + [x for x in tinfo["subagents"]
@@ -1452,6 +1732,44 @@ def build_agent(reg, pid_to_pane, names=None, captures=None):
         "prompt": pstatus["prompt"],
         "agent_status": status,
     }
+
+
+def _claim_rank(a):
+    """How strong an agent's claim on its session is: a record Claude Code
+    itself wrote beats one this dashboard inferred, a local process beats one
+    presumed to be on another host, and a process holding a pane beats one
+    without."""
+    return (not a.get("remote"), not a.get("_synth"),
+            bool(a.get("tmux")), a.get("last_activity") or 0)
+
+
+def merge_duplicates(agents):
+    """One card per conversation.
+
+    A session can genuinely be held twice — `claude --resume <sid>` run again in
+    another pane, which Claude Code allows — and each process was getting its
+    own card, so the same conversation appeared as two agents. They are folded
+    into the strongest claim, and the panes that lost are listed on it: the
+    duplicate is worth *seeing*, because two agents typing into one transcript
+    is something you probably want to resolve."""
+    best = {}
+    for a in agents:
+        sid = a["sessionId"]
+        cur = best.get(sid)
+        if cur is None:
+            best[sid] = a
+            continue
+        winner, loser = ((a, cur) if _claim_rank(a) > _claim_rank(cur) else (cur, a))
+        others = set(winner.get("also_held_in") or []) | set(loser.get("also_held_in") or [])
+        if loser.get("tmux"):
+            others.add(loser["tmux"]["target"])
+        elif loser.get("remote"):
+            others.add("another machine")
+        winner["also_held_in"] = sorted(others)
+        best[sid] = winner
+    for a in best.values():
+        a.pop("_synth", None)  # internal; never leaves the server
+    return list(best.values())
 
 
 def link_spawns(agents):
@@ -1544,8 +1862,10 @@ def build_state():
     # one tmux call for every pane, instead of one per agent
     captures = capture_panes({pid_to_pane[r["pid"]]["target"]
                               for r in regs if r["pid"] in pid_to_pane})
-    agents = link_spawns([build_agent(reg, pid_to_pane, names, captures)
-                          for reg in regs])
+    marks = load_marks()
+    agents = merge_duplicates(
+        link_spawns([build_agent(reg, pid_to_pane, names, captures, marks)
+                     for reg in regs]))
     # Stable identity sort; the frontend groups by attention state.
     agents.sort(key=lambda a: (a["project"] or "", a["name"] or ""))
     # Bound the caches by size rather than by which sessions are live: past
@@ -1553,7 +1873,7 @@ def build_state():
     # opening one re-read its transcript on every poll.
     for cache, cap in ((_tail_cache, 200), (_chat_cache, 60), (_mcp_state_cache, 200),
                        (_git_cache, 200), (_history_row_cache, 500), (_ctx_peak, 200),
-                       (_sid_by_pid, 200)):
+                       (_sid_by_pid, 200), (_subagent_cache, 200)):
         if len(cache) > cap:
             cache.clear()
     spawn_dir = os.path.join(HOME, "projects")
@@ -1562,7 +1882,12 @@ def build_state():
     # Whose dashboard this is, for the avatar beside your own messages. The
     # account name only — it is already all over the payload inside every cwd,
     # so it adds nothing that wasn't there, and nothing is sent anywhere.
-    return {"agents": agents, "generated_at": time.time(),
+    # Task sub-agents: one flat list, each naming its parent. They are not
+    # agents — no pid, no pane, nothing to drive — so they stay out of `agents`
+    # and are drawn beside their parent instead.
+    subagents = [row for a in agents if not a.get("remote")
+                 for row in list_subagents(a["cwd"], a["sessionId"])]
+    return {"agents": agents, "subagents": subagents, "generated_at": time.time(),
             "user": os.environ.get("USER") or os.path.basename(HOME) or "you",
             "spawn_dir": spawn_dir + "/"}
 
@@ -1869,6 +2194,18 @@ def kill_session(session_id, pid=None):
             killed = "killed pane " + pane["target"]
         elif not owned:
             return False, (r.stderr.strip() or "tmux kill-pane failed")
+    # One conversation can be open in several panes (`claude --resume` run again
+    # elsewhere); the board shows them as one pet, so killing that pet has to end
+    # all of them. Otherwise every kill left its twins running and the panes
+    # piled up. "another machine" is a marker, not a target, and valid_pane
+    # rejects it along with anything else that isn't a live pane.
+    for target in agent.get("also_held_in") or []:
+        if not valid_pane(target):
+            continue
+        r = subprocess.run(["tmux", "kill-pane", "-t", target],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            killed = (killed + " and " if killed else "killed ") + target
     if owned and pid_alive(pid):
         try:
             os.kill(pid, signal.SIGKILL)
@@ -2027,6 +2364,18 @@ class Handler(BaseHTTPRequestHandler):
                     dirs_only=q.get("dirs", [""])[0] == "1",
                     base_dir=q.get("base", [""])[0] or None)})
                 return
+            if route == "/api/tree":
+                q = parse_qs(urlparse(self.path).query)
+                sid = q.get("sid", [""])[0]
+                agent = next((a for a in cached_state()["agents"]
+                              if a["sessionId"] == sid), None)
+                if not agent:
+                    self._send(404, {"error": "unknown session"})
+                    return
+                tree, err = list_tree(agent["cwd"], q.get("sub", [""])[0])
+                self._send(200 if tree else 400,
+                           tree or {"error": err})
+                return
             if route == "/api/sessions":
                 cwd = parse_qs(urlparse(self.path).query).get("cwd", [""])[0]
                 self._send(200, {"sessions": list_resumable(cwd)})
@@ -2036,7 +2385,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if route == "/api/chat":
                 sid = parse_qs(urlparse(self.path).query).get("sid", [""])[0]
-                agent = next((a for a in cached_state()["agents"]
+                state = cached_state()
+                # A sub-agent's transcript is not at the usual path, so its file
+                # is taken from the row the server itself produced rather than
+                # built from the id — a whitelist by construction, like artifacts.
+                sub = next((r for r in state.get("subagents", [])
+                            if r["sessionId"] == sid), None)
+                if sub:
+                    self._send(200, {"messages": load_chat_file(sub["path"])})
+                    return
+                agent = next((a for a in state["agents"]
                               if a["sessionId"] == sid), None)
                 cwd = agent["cwd"] if agent else next(
                     (r["cwd"] for r in list_history() if r["sessionId"] == sid), None)
@@ -2073,6 +2431,8 @@ class Handler(BaseHTTPRequestHandler):
                                                      b.get("pid")),
                    "/api/rename": lambda b: set_name(b.get("sid", ""),
                                                      b.get("name", "")),
+                   "/api/mark": lambda b: set_mark(b.get("sid", ""),
+                                                   b.get("tag"), b.get("star")),
                    "/api/model": lambda b: set_model(b.get("target", ""),
                                                      b.get("model", "")),
                    "/api/mode": lambda b: set_mode(b.get("target", ""),

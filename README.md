@@ -123,10 +123,16 @@ you restart them.
   this: it comes from the parent's own transcript, remembered while both are
   alive in `~/.claude/agent-manager-spawns.json`. Starting a session yourself
   with **+ New agent** doesn't make it anyone's child.
-- See sub-agents a session spawned with the Task tool. Those run *inside* the
-  parent process — no pid, no pane, no transcript of their own — so they never
-  get a pet; they show as chips on the parent's card, live ones from the pane's
-  agent roster and finished ones from the transcript.
+- See sub-agents a session ran with the Task tool. They run *inside* the parent
+  process — no pid, no pane, nothing to send input to — but they **do** keep
+  their own transcript, so the parent's card says how many it ran and its
+  Overview lists them with the directive each was given; click one to read the
+  whole exchange. Running and just-launched ones are coloured apart from the
+  finished ones, which fold away behind a single line. A pet with sub-agents
+  still running counts as working, even when it isn't the one typing.
+- Browse the folder an agent works in, two levels deep, from its Overview. One
+  directory is read when you open it and never again until you reopen the card,
+  and the server refuses to look outside that agent's own working directory.
 - If a session ever fails to show up on the board, open `/api/debug?token=…` —
   it lists every tmux-pane process and registry entry with the checks each one
   passed, which pinpoints why it was filtered out.

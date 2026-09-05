@@ -22,6 +22,8 @@
   --warning: #b5822a;
   --critical: #d4657f;
   --accent: #e8825a;
+  /* token counts, so a number reads as a measurement and not as prose */
+  --tok: #4a83b8;
   --accent-ink: #ffffff;
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
   --shadow-card: 0 1px 2px rgba(59,51,64,0.07), 0 8px 22px rgba(59,51,64,0.09);
@@ -60,6 +62,7 @@
     --warning: #ffd866;
     --critical: #ff6188;
     --accent: #fc9867;
+    --tok: #78dce8;
     --accent-ink: #2b1a10;
     --shadow-card: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.28);
     --shadow-modal: 0 24px 70px rgba(0,0,0,0.6), 0 4px 16px rgba(0,0,0,0.4);
@@ -90,6 +93,7 @@
     --warning: #ffd866;
     --critical: #ff6188;
     --accent: #fc9867;
+    --tok: #78dce8;
     --accent-ink: #2b1a10;
     --shadow-card: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.28);
     --shadow-modal: 0 24px 70px rgba(0,0,0,0.6), 0 4px 16px rgba(0,0,0,0.4);
@@ -138,6 +142,30 @@ h1::before { content: ""; }
 
 /* counts styled like little LCD chips on the device band */
 .stat-row { display: flex; gap: 8px; flex-wrap: wrap; }
+/* Shelf controls: which pets to show, and whether to cluster them. The header
+   is a single row of many things, so these stay terse and never wrap — the
+   labels are short and the full meaning lives in each control's tooltip. */
+.live-filters {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: nowrap; flex-shrink: 0;
+}
+.live-tag {
+  font: 600 11px var(--mono); color: var(--header-ink);
+  background: color-mix(in srgb, var(--header-ink) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--header-ink) 30%, transparent);
+  border-radius: 7px; padding: 3px 6px; cursor: pointer; max-width: 8.5em;
+}
+.live-tag:hover { background: color-mix(in srgb, var(--header-ink) 20%, transparent); }
+.live-toggle {
+  display: flex; align-items: center; gap: 4px; cursor: pointer;
+  font: 600 11px var(--mono); color: var(--header-ink); white-space: nowrap;
+  user-select: none;
+}
+.live-toggle input { cursor: pointer; margin: 0; accent-color: var(--accent); }
+/* When the header runs short of room the decorative key goes first; the working
+   controls survive down to a much narrower window. */
+@media (max-width: 1150px) { .legend-wrap { display: none; } }
+@media (max-width: 820px) { .live-filters { display: none; } }
 .stat {
   display: flex;
   align-items: center;
@@ -338,11 +366,15 @@ main {
 .cd-row { display: grid; grid-template-columns: 1fr auto 46px; gap: 10px; align-items: center; }
 .cd-key { color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .cd-dot { width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0; }
-.cd-val { color: var(--ink); font: 12.5px var(--mono); text-align: right; }
+/* Token counts get their own colour throughout: a number that is a measurement
+   should not read like the label next to it. */
+.cd-val, .tok { color: var(--tok); font: 12.5px var(--mono); text-align: right; }
 .cd-pct { color: var(--muted); font: 12.5px var(--mono); text-align: right; }
 .cd-total { margin-top: 4px; padding-top: 7px; border-top: 1px solid var(--hairline); }
-.cd-total .cd-key, .cd-total .cd-val { color: var(--ink); font-weight: 650; }
-.cd-window .cd-key, .cd-window .cd-val { color: var(--muted); }
+.cd-total .cd-key { color: var(--ink); font-weight: 650; }
+.cd-total .cd-val { font-weight: 700; }
+.cd-window .cd-key { color: var(--muted); }
+.cd-window .cd-val { color: color-mix(in srgb, var(--tok) 55%, var(--muted)); }
 
 .badge {
   display: inline-flex;
@@ -826,6 +858,20 @@ main {
 .md .codeblock { background: var(--page); border: 1px solid var(--hairline); border-radius: 8px; padding: 10px 12px; margin: 6px 0 8px; overflow-x: auto; }
 .md .codeblock code { background: none; padding: 0; white-space: pre; }
 .md a { color: var(--accent); }
+/* Tables were the gap that mattered: a plan or a summary is usually half
+   tables, and without them the whole thing arrived as a wall of pipes. */
+.md table { border-collapse: collapse; margin: 6px 0 8px; font-size: 12.5px;
+  display: block; max-width: 100%; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--hairline); padding: 4px 9px;
+  text-align: left; vertical-align: top; }
+.md th { background: color-mix(in srgb, var(--ink) 6%, transparent);
+  font-weight: 650; color: var(--ink); white-space: nowrap; }
+.md blockquote { margin: 6px 0 8px; padding: 2px 0 2px 11px;
+  border-left: 3px solid var(--hairline); color: var(--ink-2); }
+.md blockquote p { margin: 0 0 4px; }
+.md hr { border: 0; border-top: 1px solid var(--hairline); margin: 10px 0; }
+.md del { opacity: .6; }
+.md ul ul, .md ol ol, .md ul ol, .md ol ul { margin: 2px 0 2px; }
 
 /* ---------- work graph ---------- */
 .dag-wrap { background: var(--surface-2); border-radius: var(--r-inset); padding: 16px; }
@@ -919,7 +965,20 @@ main {
 }
 
 .tama-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.tama-top .agent-name { flex: 1; font: 700 14px var(--mono); color: var(--lcd-ink); }
+/* min-width:0 + ellipsis so the chips beside it can never push it out of the
+   card — a flex item's default min-width is its content, not zero. */
+.tama-top .agent-name {
+  flex: 1; min-width: 0; font: 700 14px var(--mono); color: var(--lcd-ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* which tmux session the pet lives in, right beside its name */
+.tmux-name {
+  font: 700 9.5px var(--mono); flex-shrink: 0; max-width: 11em; cursor: help;
+  color: var(--lcd-dim); background: var(--lcd-hi);
+  border: 1px solid color-mix(in srgb, var(--lcd-ink) 25%, transparent);
+  border-radius: 5px; padding: 1px 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .tama-top .state-ico { width: auto; font-size: 12px; }
 .model-tag {
   font: 800 9px var(--mono); text-transform: uppercase; letter-spacing: .1em;
@@ -1067,11 +1126,22 @@ button.model-tag:hover { background: var(--lcd); }
 }
 
 /* sub-agents: spawned inside a session, shown on its own card */
-.subagents { display: flex; align-items: center; gap: 5px; margin-top: 7px; flex-wrap: wrap; }
-.sub-label {
-  font: 800 8.5px var(--mono); text-transform: uppercase; letter-spacing: .1em;
-  color: var(--lcd-dim);
+/* One quiet line: how many Task sub-agents this session ran. They are not on
+   the shelf — they are read-only records, and putting them beside real agents
+   in the same shape made the two impossible to tell apart. */
+.subagents {
+  display: flex; align-items: baseline; gap: 6px; margin-top: 7px;
+  font: 700 9.5px var(--mono); color: var(--lcd-dim);
+  letter-spacing: .04em; min-width: 0;
 }
+.sub-fork { font-size: 11px; line-height: 1; opacity: .8; }
+.sub-count { white-space: nowrap; }
+.subagents.live .sub-fork, .subagents.live .sub-count { color: var(--lcd-ink); }
+.sub-split {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: .78; font-weight: 600;
+}
+.sub-split::before { content: "\00b7\00a0"; }
 .sub-chip {
   font: 700 9.5px var(--mono);
   padding: 1px 6px; border-radius: 5px;
@@ -1094,14 +1164,53 @@ button.model-tag:hover { background: var(--lcd); }
 }
 .sub-row .sub-chip {
   background: var(--surface-2); color: var(--ink-2);
-  border-color: var(--border); opacity: 1;
+  border-color: var(--border); opacity: 1; animation: none;
 }
-.sub-row.live .sub-chip {
-  color: var(--accent); border-color: var(--accent); animation: none;
-}
+/* Three states, three colours: green is running, amber has only just been
+   launched and has nothing to read yet, grey is history. */
+.sub-row .sub-chip.running { color: var(--good); border-color: var(--good); }
+.sub-row .sub-chip.starting { color: var(--warning); border-color: var(--warning); }
 .sub-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub-state { font: 11px var(--mono); color: var(--muted); }
-.sub-row.live .sub-state { color: var(--accent); }
+.sub-state.running { color: var(--good); }
+.sub-state.starting { color: var(--warning); }
+.sub-row.done { color: var(--muted); }
+
+/* The finished ones fold away behind one line. */
+.sub-fold {
+  display: flex; align-items: center; gap: 7px;
+  font: 11px var(--mono); color: var(--muted);
+  cursor: pointer; user-select: none;
+  border-radius: 6px; padding: 3px 4px; margin: -1px -4px;
+  transition: background .12s ease, color .12s ease;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sub-fold:hover { background: var(--surface-3); color: var(--ink-2); }
+.fold-caret { display: inline-block; transition: transform .14s ease; }
+.sub-fold.open .fold-caret { transform: rotate(90deg); }
+/* A sub-agent that kept a transcript can be opened and read. */
+.sub-row.open { cursor: pointer; border-radius: 6px; padding: 2px 4px; margin: -2px -4px;
+  transition: background .12s ease; }
+.sub-row.open:hover { background: var(--surface-3); }
+.sub-row.open:active { transform: translateY(1px); }
+
+/* working-directory tree — two levels, opened one folder at a time */
+.tree { display: flex; flex-direction: column; gap: 1px; font: 12px var(--mono); }
+.tree-row, .tree-note {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 4px 2px calc(4px + var(--d) * 15px);
+  border-radius: 5px; min-width: 0;
+}
+.tree-caret { width: 9px; text-align: center; color: var(--muted); flex: none;
+  transition: transform .14s ease; }
+.tree-row.open > .tree-caret { transform: rotate(90deg); color: var(--accent); }
+.tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-row.dir { color: var(--ink); font-weight: 650; }
+.tree-row.file { color: var(--ink-2); }
+.tree-row.deep { color: var(--muted); font-weight: 500; }
+.tree-row.can-open { cursor: pointer; transition: background .12s ease; }
+.tree-row.can-open:hover { background: var(--surface-3); }
+.tree-note { color: var(--muted); font-style: italic; }
 
 /* approve controls — chunky pixel keys on the LCD */
 .tama-screen .approve-row { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -1361,6 +1470,142 @@ button.model-tag:hover { background: var(--lcd); }
   font: 600 11px var(--mono); color: var(--muted);
   border: 1px solid var(--border); border-radius: 7px; padding: 3px 9px;
 }
+/* ---- tags and stars ----
+   Pets sharing a tag are drawn as one cluster: the starred ones at full size,
+   the rest as small cards beside them. */
+/* A cluster takes two columns of the shelf so the lead card keeps its width,
+   exactly as a cemetery family plot does. */
+.tag-cluster {
+  position: relative;
+  grid-column: span 2;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px; align-items: start;
+  padding: 19px 9px 9px;
+  border: 1px dashed var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.tag-label {
+  position: absolute; top: 5px; left: 13px; max-width: calc(100% - 26px);
+  font: 700 9.5px var(--mono); letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tag-leads { display: grid; gap: 10px; min-width: 0; }
+.tag-satellites {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  align-content: start; min-width: 0;
+}
+/* One satellite is a headstone-shaped card, not a squashed handheld: a centred
+   column whose every row is width-bounded, so a long name is clipped rather
+   than spilling past the border. */
+.mini-card {
+  position: relative; min-width: 0; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 7px 6px 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card-tint) 16%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--card-tint) 42%, var(--border));
+  transition: transform .16s ease, border-color .16s ease;
+}
+.mini-card:hover { transform: translate(-2px,-2px); border-color: var(--ink-2); }
+.mini-card::before {  /* hover pad, same trick as the full cards */
+  content: ""; position: absolute; inset: -3px; z-index: -1; border-radius: inherit;
+}
+.mini-card > div { max-width: 100%; }   /* the rule that stops any row escaping */
+.mini-pet { width: 34px; }
+.mini-pet .mascot { width: 100%; height: auto; }
+.mini-name {
+  width: 100%; text-align: center;
+  font: 650 10.5px var(--sans); color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The same rows a headstone carries, minus the death time — every one bounded
+   and clipped, so a long path or name is cut rather than spilling out. */
+.mini-tmux, .mini-path, .mini-git {
+  width: 100%; text-align: center;
+  font: 8px var(--mono); color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mini-tmux { color: var(--ink-2); font-weight: 700; cursor: help; }
+.mini-tmux.remote { font-style: italic; }
+.mini-path { direction: rtl; }          /* keep the tail of the path visible */
+.mini-git { color: var(--ink-2); }
+.mini-facts {
+  display: flex; gap: 6px; justify-content: center; margin-top: 1px;
+  font: 8px var(--mono); color: var(--muted); white-space: nowrap;
+  max-width: 100%; overflow: hidden;
+}
+.mini-state {
+  width: 100%; text-align: center;
+  font: 700 8px var(--mono); text-transform: uppercase; letter-spacing: .06em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* the star sits in the corner so it can't push the column around */
+.mini-card .star-btn { position: absolute; top: 1px; right: 2px; font-size: 10px; }
+
+.star-btn {
+  border: none; background: none; cursor: pointer; flex-shrink: 0;
+  font-size: 13px; line-height: 1; padding: 1px 3px; border-radius: 5px;
+  color: var(--muted); transition: color .12s ease;
+}
+.star-btn.on { color: #e8b33a; }
+
+/* A starred pet's card catches the light. Opacity only, on a long ease-in-out
+   with the three glints offset against each other, so something twinkles about
+   every 1.5s and nothing ever moves — the shelf's no-motion rule still holds,
+   and prefers-reduced-motion turns it off with everything else. */
+.sparkles {
+  position: absolute; inset: 0; pointer-events: none;
+  overflow: hidden; border-radius: inherit;
+}
+.sparkles i {
+  position: absolute; width: 4px; height: 4px; border-radius: 50%;
+  background: #ffd866; opacity: 0;
+  box-shadow: 0 0 6px 1px color-mix(in srgb, #ffd866 65%, transparent);
+  animation: sparkle 4.5s ease-in-out infinite;
+}
+.sparkles i:nth-child(1) { top: 8%;  left: 91%; animation-delay: 0s; }
+.sparkles i:nth-child(2) { top: 63%; left: 96%; animation-delay: 1.5s; }
+.sparkles i:nth-child(3) { top: 28%; left: 3%;  animation-delay: 3s; }
+@keyframes sparkle { 0%, 74%, 100% { opacity: 0; } 87% { opacity: .8; } }
+.card.tama.starred {
+  border-color: color-mix(in srgb, #e8b33a 45%, var(--shell-edge));
+}
+.star-btn:hover { color: #e8b33a; background: var(--surface-3); }
+.star-btn:active { transform: translateY(1px); }
+.tag-pip {
+  font: 700 9px var(--mono); letter-spacing: .05em; flex-shrink: 0;
+  color: var(--lcd-dim); border: 1px solid currentColor;
+  border-radius: 5px; padding: 1px 5px;
+}
+.tag-btn {
+  font: 600 10.5px var(--mono); cursor: pointer; flex-shrink: 0;
+  color: var(--muted); background: var(--surface-2);
+  border: 1px dashed var(--border); border-radius: 7px; padding: 2px 8px;
+}
+.tag-btn.on { color: var(--ink-2); border-style: solid; }
+.tag-btn:hover { color: var(--ink); border-color: var(--muted); }
+.tag-btn:active { transform: translateY(1px); }
+.tag-input {
+  font: 600 10.5px var(--mono); width: 9em;
+  color: var(--ink); background: var(--surface);
+  border: 1px solid var(--accent); border-radius: 7px; padding: 2px 8px;
+}
+/* Below two shelf columns a cluster can't span two of them, so it stacks. */
+@media (max-width: 800px) {
+  .tag-cluster { grid-column: auto; grid-template-columns: 1fr; }
+}
+
+/* One conversation open in several panes at once — worth noticing, not alarming. */
+.dup-tag {
+  font: 600 10px var(--mono); cursor: help; white-space: nowrap;
+  color: color-mix(in srgb, var(--warning) 78%, var(--shell-ink));
+  background: color-mix(in srgb, var(--warning) 24%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--warning) 55%, transparent);
+  border-radius: 6px; padding: 2px 7px;
+}
+
 /* Bring a past conversation back as a running agent. */
 .revive-btn {
   font: 700 11px var(--mono); cursor: pointer;
