@@ -186,7 +186,8 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
   <li><strong>A Task sub-agent <em>does</em> keep a transcript</strong>, at
       <code>&lt;project&gt;/&lt;parent sid&gt;/subagents/agent-&lt;id&gt;.jsonl</code> — the parent's
       id is in the path. It has no pid and no pane (it runs inside the parent), so it can never
-      be driven, but its conversation is readable and it gets a card beside its parent. Its
+      be driven, but its conversation is readable, so it is a row in the parent's popup — not a
+      card on the shelf, which is reserved for sessions you can actually act on. Its
       opening prompt is often wrapped in a <code>&lt;…&gt;</code> preamble of standing
       instructions; strip that or every fork looks identical. <code>/api/chat</code> resolves a
       sub-agent by the path on the row the server produced, never by building one from the id.</li>

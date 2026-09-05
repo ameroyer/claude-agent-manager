@@ -158,8 +158,14 @@ const PENDING_MODEL_TIP = "Switched — this is the model it will answer with. "
   + "The session hasn't replied yet, and only a reply makes it official.";
 
 function modelPending(a) {
-  return !!a.model_pending
-      && modelFamily(a.model_pending) !== modelFamily((a.context_breakdown || {}).model);
+  if (!a.model_pending) return false;
+  const family = modelFamily(a.model_pending);
+  // An argument we cannot place — `/model default`, or any alias not in the
+  // table — says a switch happened but not what to. Drawing it would strip the
+  // pet's hat and label the pill "egg", which is worse than the old model: that
+  // one is at least still true until the session answers.
+  if (family === "other") return false;
+  return family !== modelFamily((a.context_breakdown || {}).model);
 }
 
 function shownModel(a) {
@@ -1100,6 +1106,30 @@ function rosterPet(name, parent) {
           context_breakdown: null, tmux: null, remote: false};
 }
 
+/* The rows share their sprites instead of each carrying its own. Twelve of them
+   unfolded came to 1,656 <rect>s and 107 KB of markup, rebuilt on every poll —
+   the same cost that made the Exchange slow before it started defining a pet
+   once and referencing it (see petDefsHtml). Sub-agents of one session normally
+   look alike, so in practice this collapses to a single definition.
+
+   The key is the look, not the session: two forks on the same model in the same
+   repo are the same drawing. */
+function subPetKey(a) {
+  const c = critterOf(a);
+  return "sp" + hashStr([shownModel(a) ? "pet" : "egg", c.skin.body, c.hat].join("|"));
+}
+
+function subPetDefsHtml(rows) {
+  const seen = new Map();
+  for (const r of rows) {
+    const k = subPetKey(r.pet);
+    if (!seen.has(k)) seen.set(k, mascotRects(r.pet, {hideItem: true}));
+  }
+  return `<svg class="pet-defs" aria-hidden="true" width="0" height="0">${
+    [...seen].map(([k, rects]) =>
+      `<symbol id="${k}" viewBox="${PET_VIEWBOX}">${rects}</symbol>`).join("")}</svg>`;
+}
+
 function subRowHtml(row) {
   // "starting…" is a roster entry with no transcript yet: nothing to open, and
   // it gets its own colour so it doesn't read as a running agent you can read.
@@ -1109,7 +1139,8 @@ function subRowHtml(row) {
       row.sid ? ` data-sid="${esc(row.sid)}"` : ""}
     title="${row.sid ? "Open this sub-agent's transcript"
                      : "Just launched — it hasn't written anything yet"}">
-    <span class="sub-pet">${mascotSvg(row.pet, "sub-mascot", {hideItem: true})}</span>
+    <span class="sub-pet"><svg class="mascot sub-mascot" shape-rendering="crispEdges"
+      aria-hidden="true"><use href="#${subPetKey(row.pet)}"/></svg></span>
     <span class="sub-chip ${cls}">${esc(row.name)}</span>
     <span class="sub-task">${esc(row.task || "—")}</span>
     ${family === "other"
@@ -1145,10 +1176,12 @@ function subagentsSectionHtml(a) {
       open ? "" : ` · ${esc(done.slice(0, 2).map(r => r.name).join(", "))}${
         done.length > 2 ? "…" : ""}`}
   </div>${open ? done.map(subRowHtml).join("") : ""}` : "";
+  // Only the rows actually drawn: a folded-away sub-agent costs nothing at all.
+  const drawn = open ? rows : live;
   return `<div class="section">
     <div class="section-title">Sub-agents
       <span class="when">run inside this session — no pet of their own</span></div>
-    <div class="sub-list">${live.map(subRowHtml).join("")}${fold}</div>
+    <div class="sub-list">${subPetDefsHtml(drawn)}${live.map(subRowHtml).join("")}${fold}</div>
   </div>`;
 }
 
