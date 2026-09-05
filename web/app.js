@@ -1803,19 +1803,34 @@ function workingLabel(a) {
 
 /* A pet strolling along a line under the last message, with its status walking
    behind it, so a long silent turn still looks alive. The stroll is offset by
-   wall-clock time: the poll rebuilds this element, and without that the
-   animation would restart from the left edge on every rebuild. */
+   wall-clock time so that a rebuild doesn't restart it from the left edge —
+   but that offset is applied to the node afterwards (see syncWalkers), never
+   written into the markup. */
 const WALK_SECONDS = 11;  // must match the pet-stroll duration in style.css
 function workingStripHtml(a) {
   if (a.state !== "busy") return "";
   const pct = typeof a.progress === "number" ? ` ${a.progress}%` : "";
-  const phase = (Date.now() / 1000) % WALK_SECONDS;
   return `<div class="work-strip"><div class="work-track">
-      <span class="work-walker" style="animation-delay:-${phase.toFixed(2)}s">
+      <span class="work-walker">
         ${mascotSvg(a, "work-pet", {hideItem: true})}
         <span class="work-label">${esc(workingLabel(a))}${pct}…</span>
       </span>
     </div></div>`;
+}
+
+/* Put the walker where wall-clock time says it should be.
+
+   This is a DOM write on purpose. The offset used to be an inline style in the
+   markup, which meant the string differed on every single call — two characters
+   out of 168,000 — and that was enough to defeat renderModal's "nothing changed,
+   leave the DOM alone" guard. So for as long as an agent was busy, the whole
+   open conversation (~2,700 elements, ~900 sprite rects) was torn down and
+   rebuilt every 600 ms, which is what made switching tabs feel slow: the click
+   landed while the main thread was mid-rebuild. Kept off the markup, the guard
+   works again and the walker keeps strolling on the node that is already there. */
+function syncWalkers(root) {
+  const delay = `-${((Date.now() / 1000) % WALK_SECONDS).toFixed(2)}s`;
+  root.querySelectorAll(".work-walker").forEach(w => { w.style.animationDelay = delay; });
 }
 
 /* The permission dialog the pane is showing, as the last entry in the
@@ -2339,6 +2354,7 @@ function renderModal() {
   const opened = [...body.querySelectorAll("details")].map(d => d.open);
   body.innerHTML = html;
   lastBodyHtml = html;
+  syncWalkers(body);  // a rebuilt walker resumes mid-stride instead of restarting
   body.querySelectorAll("details").forEach((d, i) => { if (opened[i]) d.open = true; });
   const msgs = chat.messages || [];
   // Tool entries carry no .text — reading it unguarded threw here, which

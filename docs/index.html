@@ -364,6 +364,17 @@ nothing builds a path from it — so it is escaped at every render rather than r
       <code>paintGrid</code> now writes one slot at a time, skips anything under the pointer,
       and defers a reshuffle while a card is hovered. <strong>Measure DOM writes before
       theorising about animation.</strong></li>
+  <li><strong>The same trap caught the popup, from the other direction.</strong>
+      <code>renderModal</code> guards its rebuild the same way, and there the guard worked — until
+      the walking pet started writing its stroll offset into the markup as an inline
+      <code>animation-delay</code> built from <code>Date.now()</code>. That is <em>two
+      characters out of 168,000</em>, and it differed on every call, so a busy agent's open
+      Exchange — about 2,700 elements and 900 sprite rects — was torn down and rebuilt every
+      600&nbsp;ms. It never read as flicker; it read as the tabs being slow to switch, because the
+      click landed while the main thread was mid-rebuild. The offset is now applied to the node
+      after rendering (<code>syncWalkers</code>), which keeps the walk continuous <em>and</em> the
+      markup stable. <strong>Anything derived from the clock belongs on the node, never in a
+      string you intend to compare.</strong></li>
   <li><strong>Sliding an element on <code>:hover</code> can also flicker.</strong> The shift
       moves it out from under a cursor near its trailing edge, hover drops, it slides back, and
       it oscillates. The fix is a negative-<code>z-index</code> <code>::before</code> pad inset
