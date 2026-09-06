@@ -1051,6 +1051,10 @@ button.model-tag:hover { background: var(--lcd); }
   background: var(--surface-3); color: var(--muted);
   border: 1.5px dashed var(--border);
   border-radius: 6px; padding: 1px 5px; flex-shrink: 0; white-space: nowrap;
+  /* Bounded like .tmux-name: the reset time is free text from the notice, and
+     the card's top row is a flex line where only the name can give way. The
+     full wording is in the tooltip and spelled out in the popup. */
+  max-width: 13em; overflow: hidden; text-overflow: ellipsis;
 }
 .limit-note {
   display: flex; align-items: center; gap: 9px;
