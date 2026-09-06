@@ -202,6 +202,18 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       <code>/model</code> counts, so typing it in the pane moves the pet too. Stop at the
       newest one even when it names nothing (a bare <code>/model</code> opens the CLI's picker),
       or an older switch gets dug up and reported as if it were still coming.</li>
+  <li><strong>A turn that never happened is still written as an assistant record.</strong>
+      Hit a usage limit — or an expired login, or a 529 — and Claude Code appends a message
+      whose model is the literal <code>&lt;synthetic&gt;</code> and whose usage block is present
+      but all zeros. Read as the session's latest reply, that made the model unknown and the
+      token count nought: the pet lost its hat and its pill read <em>egg</em>, on a session that
+      had a perfectly good model. Skip these when establishing the model, the context size and
+      whether the session has replied — a refused turn settles nothing, including a pending
+      <code>/model</code>. The ordinary ones (<code>No response requested.</code>) are far more
+      common than the limits, so a synthetic record is not on its own a sign of trouble; only
+      the text tells you. When it <em>is</em> a limit, the pet greys out and the card says when
+      it resets — the pet only, never the card: nothing is wrong with the session, it just has
+      to wait.</li>
   <li><strong>A sub-agent is not necessarily on its parent's model.</strong> An agent
       definition can name its own, so inheriting the parent's put the wrong hat on every
       cheap helper. It is read from the sub-agent's own transcript instead, and a fork that

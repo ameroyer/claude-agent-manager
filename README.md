@@ -11,6 +11,7 @@ Each pet's look encodes where it lives, so you can read the fleet at a glance:
 | hat | the model — wizard / crown / poet's hat / kitsune mask for Fable / Opus / Sonnet / Haiku |
 | held item | the git branch — everyone on `main` carries the sword |
 | an egg instead of a pet | the session hasn't replied yet, so its model is unknown |
+| a greyed-out pet | it hit its usage limit — the card says when it resets |
 
 The mood pill, the badge and the card's border track what the agent is doing
 right now, and the device lights fill up as the session eats its context window.

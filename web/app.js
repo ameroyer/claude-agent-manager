@@ -525,8 +525,13 @@ function mascotRects(a, opts = {}) {
   return px.join("");
 }
 
+/* A pet that has hit a usage limit greys out — the pet only, deliberately not
+   the card: the session is fine, its work is intact and its model unchanged, it
+   simply cannot act until the limit resets. Colouring the whole card would say
+   something is wrong with the agent, which is not what happened. */
 function mascotSvg(a, cls = "", opts = {}) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${cls}"
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${
+      a.limited ? "timed-out " : ""}${cls}"
     viewBox="${PET_VIEWBOX}" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
     aria-hidden="true">${mascotRects(a, opts)}</svg>`;
 }
@@ -1196,6 +1201,15 @@ function parentPetHtml(a) {
     mascotSvg(parent, "lineage-mascot", {hideItem: true})}</span>`;
 }
 
+/* "Timed out": the session hit a usage limit and can't act until it resets.
+   Said in words as well as by the greyed pet, because a grey pet alone doesn't
+   tell you when it comes back — and that is the one thing you want to know. */
+function limitPipHtml(a) {
+  if (!a.limited) return "";
+  return `<span class="limit-pip" title="${esc(a.limited.text)}">timed out${
+    a.limited.resets ? ` · ${esc(a.limited.resets)}` : ""}</span>`;
+}
+
 /* The three lamps used to be status / context level / repo family. Status is
    already said three other ways on this card, and the repo is now the card's own
    colour, so two of them said nothing. They are one gauge instead: five lamps
@@ -1242,6 +1256,7 @@ function cardHtml(a) {
         <span class="agent-name" title="${esc(a.name)} — click to open, rename inside">${esc(a.display_name || a.name)}</span>
         ${a.tmux ? `<span class="tmux-name" title="tmux session — attach with:  tmux attach -t ${esc(a.tmux.session)}">⧉ ${esc(a.tmux.session)}</span>` : ""}
         ${a.tag ? `<span class="tag-pip" title="Tagged “${esc(a.tag)}”">#${esc(a.tag)}</span>` : ""}
+        ${limitPipHtml(a)}
         ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
         ${drafts[a.sessionId] ? `<span class="draft-pip" title="Unsent message waiting here: ${esc(drafts[a.sessionId].slice(0, 120))}">draft</span>` : ""}
         ${a.tmux ? `<button class="model-tag${pend ? " pending" : ""}" data-target="${esc(a.tmux.target)}"
@@ -1692,6 +1707,12 @@ function overviewTab(a) {
       : "";
     out.push(`<div class="section"><div class="notif">⚠ ${esc(a.notification || "Needs your approval")}</div>
       ${detail}${approvalActionsHtml(a)}</div>`);
+  }
+  // Why it isn't working, above what it was doing: a limit outranks the rest,
+  // because nothing below it will move until the limit lifts.
+  if (a.limited) {
+    out.push(`<div class="section"><div class="limit-note">
+      <span class="limit-pip">timed out</span>${esc(a.limited.text)}</div></div>`);
   }
   // What it is doing right now, once. This used to be an activity line here and
   // a walking pet at the foot of the old "Last exchange" section, which said the

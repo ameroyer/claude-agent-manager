@@ -425,6 +425,29 @@ _MODEL_CMD_RE = re.compile(
     re.S)
 
 
+# The model Claude Code stamps on a turn that never reached the API.
+SYNTHETIC_MODEL = "<synthetic>"
+# Which of those mean "this agent cannot work until something resets or you act",
+# as opposed to the ordinary ones ("No response requested.") or a transient
+# server error that retries on its own.
+_LIMIT_RE = re.compile(r"hit your [^·\n]*limit|out of usage credits|login expired",
+                       re.I)
+_RESETS_RE = re.compile(r"resets?\s+([^·\n]+)", re.I)
+
+
+def limit_notice(msg):
+    """A synthetic message's text if it says the session is blocked, else None.
+
+    Returned as {"text", "resets"} — `resets` is the part worth putting on a
+    card, so the pet can say when it comes back rather than only that it left."""
+    text = " ".join(b.get("text", "") for b in (msg.get("content") or [])
+                    if isinstance(b, dict) and b.get("type") == "text").strip()
+    if not text or not _LIMIT_RE.search(text):
+        return None
+    m = _RESETS_RE.search(text)
+    return {"text": text[:200], "resets": m.group(1).strip()[:40] if m else None}
+
+
 def model_command_arg(content):
     """The model named by a `/model <id>` command record, or None.
 
@@ -442,7 +465,7 @@ def tail_transcript(cwd, session_id):
     info = {"last_assistant": None, "last_prompt": None, "title": None,
             "mtime": None, "context_tokens": None, "context_breakdown": None,
             "permission_mode": None, "pending_tool": None, "last_activity": None,
-            "model_requested": None, "subagents": [],
+            "model_requested": None, "limited": None, "subagents": [],
             "spawned": []}
     if not os.path.exists(path):
         return info
@@ -482,8 +505,20 @@ def tail_transcript(cwd, session_id):
             info["last_activity"] = iso_to_epoch(rec["timestamp"])
         t = rec.get("type")
         if t == "assistant":
-            replied_since = True
             msg = rec.get("message") or {}
+            if msg.get("model") == SYNTHETIC_MODEL:
+                # A turn that never happened: Claude Code writes one of these
+                # when the request was refused or never sent — a usage limit, an
+                # expired login, a 529. It carries the literal model
+                # "<synthetic>" and an all-zero usage block, and taking it as the
+                # session's last reply cost the pet its hat, put "egg" on its
+                # model pill and dropped its context gauge to nothing. It is not
+                # a reply, so it settles nothing: not the model, not the token
+                # count, not a pending /model switch.
+                if info["limited"] is None and not replied_since:
+                    info["limited"] = limit_notice(msg)
+                continue
+            replied_since = True
             if info["context_tokens"] is None:
                 u = msg.get("usage") or {}
                 if u:
@@ -1764,6 +1799,9 @@ def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
         # A `/model` newer than the last reply: what it will use next, which the
         # breakdown above cannot know yet. Drawn as pending, never as fact.
         "model_pending": tinfo["model_requested"],
+        # Hit a usage limit (or an expired login) and hasn't worked since. The
+        # pet greys out; it keeps its hat, because it keeps its model.
+        "limited": tinfo["limited"],
         "permission_mode": pstatus["mode"] or tinfo["permission_mode"],
         "activity": (pstatus["activity"] or sub_activity) if state == "busy" else None,
         "progress": pstatus["progress"] if state == "busy" else None,
