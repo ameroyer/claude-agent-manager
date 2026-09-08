@@ -525,13 +525,14 @@ function mascotRects(a, opts = {}) {
   return px.join("");
 }
 
-/* A pet that has hit a usage limit greys out — the pet only, deliberately not
-   the card: the session is fine, its work is intact and its model unchanged, it
-   simply cannot act until the limit resets. Colouring the whole card would say
-   something is wrong with the agent, which is not what happened. */
+/* A pet greys out when it cannot be acting: it hit a usage limit, or it lives on
+   another machine and has gone quiet. The pet only, deliberately not the card —
+   in both cases the session is intact and its work unharmed, it just isn't
+   moving. Colouring the whole card would say something is wrong with the agent,
+   which is not what happened in either case. */
 function mascotSvg(a, cls = "", opts = {}) {
   return `<svg xmlns="http://www.w3.org/2000/svg" class="mascot ${esc(a.state)} ${
-      a.limited ? "timed-out " : ""}${cls}"
+      a.limited || a.stale ? "timed-out " : ""}${cls}"
     viewBox="${PET_VIEWBOX}" shape-rendering="crispEdges" preserveAspectRatio="xMidYMid meet"
     aria-hidden="true">${mascotRects(a, opts)}</svg>`;
 }
@@ -1210,6 +1211,19 @@ function limitPipHtml(a) {
     a.limited.resets ? ` · ${esc(a.limited.resets)}` : ""}</span>`;
 }
 
+/* A remote session that has gone quiet. It is NOT reported as ended: its
+   process is on another host, so there is nothing here that could tell us it
+   died — an agent sitting and waiting for you writes nothing either. The card
+   says how long it has been since we heard anything and leaves the judgement
+   to you, which is the honest version of what used to happen: it was simply
+   removed from the board after five minutes' silence. */
+function stalePipHtml(a) {
+  if (!a.stale) return "";
+  return `<span class="limit-pip stale-pip"
+    title="Runs on another machine, and its transcript hasn't moved since. That is not proof it ended — an agent waiting on you writes nothing at all. Nothing here can see the other host's processes.">last seen ${
+    esc(ago(a.last_activity))}</span>`;
+}
+
 /* The three lamps used to be status / context level / repo family. Status is
    already said three other ways on this card, and the repo is now the card's own
    colour, so two of them said nothing. They are one gauge instead: five lamps
@@ -1257,6 +1271,7 @@ function cardHtml(a) {
         ${a.tmux ? `<span class="tmux-name" title="tmux session — attach with:  tmux attach -t ${esc(a.tmux.session)}">⧉ ${esc(a.tmux.session)}</span>` : ""}
         ${a.tag ? `<span class="tag-pip" title="Tagged “${esc(a.tag)}”">#${esc(a.tag)}</span>` : ""}
         ${limitPipHtml(a)}
+        ${stalePipHtml(a)}
         ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
         ${drafts[a.sessionId] ? `<span class="draft-pip" title="Unsent message waiting here: ${esc(drafts[a.sessionId].slice(0, 120))}">draft</span>` : ""}
         ${a.tmux ? `<button class="model-tag${pend ? " pending" : ""}" data-target="${esc(a.tmux.target)}"
@@ -1713,6 +1728,13 @@ function overviewTab(a) {
   if (a.limited) {
     out.push(`<div class="section"><div class="limit-note">
       <span class="limit-pip">timed out</span>${esc(a.limited.text)}</div></div>`);
+  }
+  if (a.stale) {
+    out.push(`<div class="section"><div class="limit-note">
+      <span class="limit-pip stale-pip">last seen ${esc(ago(a.last_activity))}</span>
+      Runs on another machine and has written nothing since. Nothing here can see
+      that host's processes, so this is silence, not proof it ended — an agent
+      waiting on you is silent too.</div></div>`);
   }
   // What it is doing right now, once. This used to be an activity line here and
   // a walking pet at the foot of the old "Last exchange" section, which said the
@@ -2431,7 +2453,24 @@ const GROUPS = [
   {id: "waiting", label: "Waiting for you", states: ["waiting"]},
   {id: "working", label: "Working", states: ["busy"]},
   {id: "idle", label: "Idle", states: ["idle"]},
+  {id: "remote", label: "On another machine", remote: true},
 ];
+
+/* Which shelf row a pet belongs to.
+
+   A remote session gets its own row: there is no pane for it here, so nothing
+   on its card can be acted on and its state is a guess from its transcript
+   rather than something read off a spinner. Mixed in among agents you can
+   actually drive, that difference is invisible.
+
+   The exception is the one the board exists for — a remote agent that needs
+   approval or is waiting on you stays in its attention row. This is the same
+   rule that pulls an urgent pet back out of a tag cluster: nothing that needs
+   answering may be filed away under a heading about where it happens to run. */
+function groupOf(a) {
+  if (a.remote && !NEEDS_YOU.includes(a.state)) return "remote";
+  return (GROUPS.find(g => (g.states || []).includes(a.state)) || {}).id;
+}
 
 /* ---------- tag clusters ----------
 
@@ -2605,9 +2644,9 @@ function render(force) {
       ? shelfClusters(shelf) : {clusters: [], claimed: new Set()};
     if (shelf.length) {
       for (const g of GROUPS) {
-        const inGroup = shelf.filter(a => g.states.includes(a.state));
+        const inGroup = shelf.filter(a => groupOf(a) === g.id);
         const list = inGroup.filter(a => !claimed.has(a.sessionId));
-        const here = clusters.filter(c => g.states.includes(c.state));
+        const here = clusters.filter(c => (g.states || []).includes(c.state));
         if (!list.length && !here.length) continue;
         // Most recent exchange first. Sorted on last_activity (the newest
         // timestamped record) rather than the transcript's file mtime, which

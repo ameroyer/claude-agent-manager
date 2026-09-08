@@ -289,7 +289,25 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       silently overrode <code>.legend-pet</code> for weeks. Use <code>.mascot.legend-pet</code>.</li>
   <li><strong>Agents on another host are invisible to <code>/proc</code> and tmux.</strong> A
       session inside <code>srun</code> shares <code>~/.claude</code> only; it is surfaced
-      read-only.</li>
+      read-only, in a shelf row of its own — nothing on its card can be acted on from here, and
+      that difference disappears when it sits among agents you can drive. Except when it needs
+      you: an off-host session that wants approval stays in its attention row, the same rule
+      that pulls an urgent pet out of a tag cluster.</li>
+  <li><strong>There is no liveness signal for an off-host session</strong>, and the registry
+      file is not one — Claude Code rewrites it on a status <em>change</em>, so a live session's
+      entry is routinely hours old (36&nbsp;h and 5&nbsp;days, measured). That leaves the
+      transcript's mtime, which is a measure of <em>work</em>, not of life. Dropping a session
+      the moment it went quiet therefore deleted it exactly when it stopped to wait for you.
+      Silence now marks rather than removes: the pet greys, the card says
+      <em>last seen 52m ago</em>, and only after <code>REMOTE_KEEP_SECONDS</code> is it
+      dropped. <strong>Never let a gap in evidence render as a confident claim</strong> — the
+      card says how long it has been quiet and lets you judge, because "it wrote nothing" and
+      "it ended" are not the same fact.</li>
+  <li><strong>A remote pid is a number from another machine.</strong> Skipping an entry because
+      <code>/proc/&lt;pid&gt;</code> exists locally hands that number to whatever unrelated
+      process happens to hold it and drops a real session — 0.06% of the time where
+      <code>pid_max</code> is 4M, but 7.7% on a box with the common 32768. The check is only
+      meaningful if a local <em>claude</em> holds it.</li>
   <li><strong>Compaction shows no elapsed timer for its first ~15 seconds</strong> — just
       <code>✶ Compacting conversation…</code>. Keying the spinner off the timer therefore
       reported nothing for most of a compaction pass. The animated glyph at the line start is

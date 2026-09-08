@@ -11,7 +11,7 @@ Each pet's look encodes where it lives, so you can read the fleet at a glance:
 | hat | the model — wizard / crown / poet's hat / kitsune mask for Fable / Opus / Sonnet / Haiku |
 | held item | the git branch — everyone on `main` carries the sword |
 | an egg instead of a pet | the session hasn't replied yet, so its model is unknown |
-| a greyed-out pet | it hit its usage limit — the card says when it resets |
+| a greyed-out pet | it can't act: hit its usage limit, or runs elsewhere and has gone quiet |
 
 The mood pill, the badge and the card's border track what the agent is doing
 right now, and the device lights fill up as the session eats its context window.
@@ -105,6 +105,12 @@ you restart them.
 
 - See every live agent grouped by state: needs approval, waiting for you,
   working, or idle. The browser tab gets a ⚠ when something needs you.
+- Agents on another machine (a session started inside `srun`, say, sharing
+  `~/.claude` over NFS) get a row of their own — they're read-only, since
+  there's no pane here to type into. Nothing here can see that host's
+  processes, so when one goes quiet its pet greys out and the card says *last
+  seen 20m ago* rather than pretending to know it ended. One that needs your
+  approval still shows up under **Needs approval**, where you'll see it.
 - Click an agent for a summary, its work graph, the recent chat, and its
   `tasks/todo.md`.
 - Approve or deny a permission prompt right from the card — it shows what's

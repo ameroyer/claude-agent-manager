@@ -1502,7 +1502,19 @@ def newest_session_id(cwd, since=0):
 # flap back to a placeholder. Pruned with the other caches in build_state.
 _sid_by_pid = {}
 
+# A remote session's liveness can only be guessed from its transcript: its
+# process is on another host, so /proc and tmux say nothing, and the registry
+# file is no help either — Claude Code rewrites it on a status *change*, not as
+# a heartbeat, so a live session's entry is routinely hours or days old.
+#
+# Heard from within this, and it is certainly working.
 REMOTE_FRESH_SECONDS = 300
+# Quiet for longer than that is not evidence it died — an agent waiting on you
+# writes nothing at all. It stays on the board, marked as unheard-from, until
+# this much silence, which is long enough that what falls off really is gone.
+# It used to be dropped at REMOTE_FRESH_SECONDS, so a remote agent vanished
+# exactly when it went quiet to wait for you: the one moment you needed it.
+REMOTE_KEEP_SECONDS = 6 * 3600
 
 
 def discover_remote_regs(seen_sids):
@@ -1524,18 +1536,21 @@ def discover_remote_regs(seen_sids):
         sid = (reg or {}).get("sessionId")
         if not reg or not sid or sid in seen_sids:
             continue
-        if pid_alive(reg.get("pid", -1)):
+        # The pid belongs to another machine, so it is only evidence about this
+        # one if a *claude* is holding it — a bare /proc check hands the number
+        # to whatever local process happens to own it and drops the session.
+        pid = reg.get("pid", -1)
+        if pid_alive(pid) and proc_comm(pid) == "claude":
             continue  # local: the normal path already judged it
         try:
-            recent = (time.time()
-                      - os.path.getmtime(transcript_path(reg.get("cwd", ""), sid))
-                      < REMOTE_FRESH_SECONDS)
+            age = time.time() - os.path.getmtime(
+                transcript_path(reg.get("cwd", ""), sid))
         except OSError:
-            recent = False
-        if not recent:
-            continue  # a stale entry from a session that has since ended
+            continue  # no transcript at all: nothing to show and nothing to read
+        if age > REMOTE_KEEP_SECONDS:
+            continue  # long gone
         seen_sids.add(sid)
-        out.append(dict(reg, remote=True))
+        out.append(dict(reg, remote=True, stale=age > REMOTE_FRESH_SECONDS))
     return out
 
 
@@ -1777,6 +1792,10 @@ def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
         "startedAt": reg.get("startedAt"),
         "tmux": pane,
         "remote": bool(reg.get("remote")),
+        # Remote and quiet for a while. Not "dead" — there is no way to know
+        # that from here — so the card says when it was last heard from and
+        # lets you judge.
+        "stale": bool(reg.get("stale")),
         "tag": (marks or {}).get(sid, {}).get("tag") or None,
         "starred": bool((marks or {}).get(sid, {}).get("star")),
         "_synth": bool(reg.get("synthesized")),  # dropped by merge_duplicates
