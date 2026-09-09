@@ -183,6 +183,17 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       denominator.</li>
   <li><strong>Transcript mtime is not activity.</strong> Claude Code rewrites untimestamped
       bookkeeping records; sort on the newest <em>timestamped</em> record instead.</li>
+  <li><strong>A long tool-calling stretch contains no message text at all.</strong> Think, call
+      a tool, read the result, repeat — the assistant records hold only
+      <code>thinking</code> and <code>tool_use</code> blocks, and the user records only
+      <code>tool_result</code>. On a busy agent that fills the whole 256&nbsp;KB tail window (42
+      assistant records, 25 tool calls, <em>zero</em> text blocks, measured), so
+      <code>last_assistant</code> and <code>last_prompt</code> both come back empty and the
+      Exchange tab hides itself on a live conversation. The bookkeeping
+      <code>last-prompt</code> record is the fallback for exactly this — but it stores the
+      prompt under <code>lastPrompt</code>, and the code read <code>prompt</code>/<code>text</code>,
+      so it never once fired. <strong>A key you guessed and never verified is a fallback that
+      does not exist</strong>; the <code>ai-title</code> branch beside it got this right.</li>
   <li><strong>A Task sub-agent <em>does</em> keep a transcript</strong>, at
       <code>&lt;project&gt;/&lt;parent sid&gt;/subagents/agent-&lt;id&gt;.jsonl</code> — the parent's
       id is in the path. It has no pid and no pane (it runs inside the parent), so it can never

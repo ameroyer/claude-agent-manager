@@ -548,7 +548,13 @@ def tail_transcript(cwd, session_id):
         elif t == "ai-title" and not info["title"]:
             info["title"] = rec.get("aiTitle") or rec.get("title")
         elif t == "last-prompt" and not info["last_prompt"]:
-            p = rec.get("prompt") or rec.get("text")
+            # `lastPrompt` is the key Claude Code actually writes — the other two
+            # were guesses and never matched, so this fallback silently did
+            # nothing for the one case it exists for: a long tool-calling stretch
+            # (think, call, read result, repeat) pushes every plain-text message
+            # out of the tail window, and the Exchange tab then had no evidence
+            # the conversation existed and hid itself on a live agent.
+            p = rec.get("lastPrompt") or rec.get("prompt") or rec.get("text")
             if p and p.strip():
                 info["last_prompt"] = p[:EXCHANGE_PREVIEW_CHARS]
         elif t == "permission-mode" and not info["permission_mode"]:
