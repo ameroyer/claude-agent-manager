@@ -1832,6 +1832,12 @@ def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
         "statusUpdatedAt": reg.get("statusUpdatedAt"),
         "startedAt": reg.get("startedAt"),
         "tmux": pane,
+        # `/remote-control` has been run here, so this session can also be
+        # reached from the Claude app. The registry records it as a
+        # `bridgeSessionId`; only the fact is published, never the id — it
+        # names a conversation on Anthropic's side and nothing on this page
+        # needs it, the same rule the MCP list follows.
+        "remote_control": bool(reg.get("bridgeSessionId")),
         "remote": bool(reg.get("remote")),
         # Remote and quiet for a while. Not "dead" — there is no way to know
         # that from here — so the card says when it was last heard from and

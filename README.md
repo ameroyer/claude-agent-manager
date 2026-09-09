@@ -105,6 +105,11 @@ you restart them.
 
 - See every live agent grouped by state: needs approval, waiting for you,
   working, or idle. The browser tab gets a ⚠ when something needs you.
+- Sessions you've run `/remote-control` in carry a `⇄ app` pip, so you can tell
+  at a glance which ones you can also reach from the Claude app on your phone.
+  That's all it claims: the app talks to Anthropic, not to this machine, so
+  nothing here can see that side or read what was said there. The pet being on
+  the board is the other half of the answer — the session is alive.
 - Agents on another machine (a session started inside `srun`, say, sharing
   `~/.claude` over NFS) get a row of their own — they're read-only, since
   there's no pane here to type into. Nothing here can see that host's

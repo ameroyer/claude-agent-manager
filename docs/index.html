@@ -303,6 +303,16 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       dropped. <strong>Never let a gap in evidence render as a confident claim</strong> — the
       card says how long it has been quiet and lets you judge, because "it wrote nothing" and
       "it ended" are not the same fact.</li>
+  <li><strong>A conversation on Anthropic's infrastructure leaves no trace here.</strong>
+      A session opened in the Claude app writes nothing to <code>~/.claude</code> — no registry
+      entry, no transcript — so this dashboard, which reads only local files, tmux and
+      <code>/proc</code>, cannot see it at all. Seeing it would mean calling the API, which ends
+      the offline guarantee. What <em>is</em> visible is the link: running
+      <code>/remote-control</code> in a local session puts a <code>bridgeSessionId</code> on its
+      registry entry, so the board can mark which pets are also reachable from the app. Publish
+      the fact, never the id — it names a conversation on Anthropic's side and nothing on the
+      page needs it, the same rule the MCP list follows. The pip claims only that the link
+      exists: whether anyone is driving it from over there is not knowable from this box.</li>
   <li><strong>A pid does not say which machine a session is on.</strong> Every entry reaching
       <code>discover_remote_regs</code> already has a pid that is dead <em>here</em> — the live
       ones were claimed earlier — so "the pid is gone" was being read as "it runs elsewhere",

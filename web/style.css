@@ -1060,6 +1060,15 @@ button.model-tag:hover { background: var(--lcd); }
   display: flex; align-items: center; gap: 9px;
   font-size: 12.5px; color: var(--ink-2);
 }
+/* `/remote-control` is on: the session can also be driven from the Claude app.
+   A statement about reach, not about state, so it is quiet — the accent border
+   marks it as a capability rather than something demanding attention. */
+.rc-pip {
+  font: 800 8.5px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+  background: var(--lcd-hi); color: var(--lcd-ink);
+  border: 1.5px solid color-mix(in srgb, var(--lcd-ink) 35%, transparent);
+  border-radius: 6px; padding: 1px 5px; flex-shrink: 0; white-space: nowrap;
+}
 /* Solid rather than dashed: a limit is a fact with a time on it, silence from
    another machine is only silence — the softer edge says "unknown", not "wrong". */
 .stale-pip { border-style: solid; opacity: .9; }

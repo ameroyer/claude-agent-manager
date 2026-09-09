@@ -1211,6 +1211,19 @@ function limitPipHtml(a) {
     a.limited.resets ? ` · ${esc(a.limited.resets)}` : ""}</span>`;
 }
 
+/* `/remote-control` has been run in this session, so it is also reachable from
+   the Claude app on your phone.
+
+   The pip says only that — that the link exists — because that is all this
+   machine knows. The app side runs on Anthropic's infrastructure and writes
+   nothing here, so there is no way to tell from this box whether anyone is
+   driving it or what was said. What the pet itself tells you is the other half:
+   it is on the board, so the session is alive. */
+function remoteControlPipHtml(a) {
+  if (!a.remote_control) return "";
+  return `<span class="rc-pip" title="Remote control is on for this session — it can be reached from the Claude app on another device. Nothing here can see that side: the app talks to Anthropic, not to this machine, so this says the link exists, not that anyone is using it.">⇄ app</span>`;
+}
+
 /* A remote session that has gone quiet. It is NOT reported as ended: its
    process is on another host, so there is nothing here that could tell us it
    died — an agent sitting and waiting for you writes nothing either. The card
@@ -1270,6 +1283,7 @@ function cardHtml(a) {
         <span class="agent-name" title="${esc(a.name)} — click to open, rename inside">${esc(a.display_name || a.name)}</span>
         ${a.tmux ? `<span class="tmux-name" title="tmux session — attach with:  tmux attach -t ${esc(a.tmux.session)}">⧉ ${esc(a.tmux.session)}</span>` : ""}
         ${a.tag ? `<span class="tag-pip" title="Tagged “${esc(a.tag)}”">#${esc(a.tag)}</span>` : ""}
+        ${remoteControlPipHtml(a)}
         ${limitPipHtml(a)}
         ${stalePipHtml(a)}
         ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
@@ -1624,6 +1638,8 @@ function detailsSectionHtml(a) {
     ["tmux", (a.tmux ? a.tmux.target : a.remote ? "on another machine" : "not found")
       + ((a.also_held_in || []).length
          ? ` · also open in ${a.also_held_in.join(", ")}` : "")],
+    ["Remote control", a.remote_control
+      ? "on — also reachable from the Claude app" : "off"],
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
     // The one row here that is a measurement rather than a fact, so its numbers
     // are coloured like every other token count on the page.
