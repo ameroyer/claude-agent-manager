@@ -1638,8 +1638,11 @@ function detailsSectionHtml(a) {
     ["tmux", (a.tmux ? a.tmux.target : a.remote ? "on another machine" : "not found")
       + ((a.also_held_in || []).length
          ? ` · also open in ${a.also_held_in.join(", ")}` : "")],
-    ["Remote control", a.remote_control
-      ? "on — also reachable from the Claude app" : "off"],
+    // Only a live session has a registry entry to read this from. A headstone's
+    // is long gone and a sub-agent never had one, so the answer there is not
+    // "off" — it is unknown, and saying "off" would be inventing it.
+    ["Remote control", a.remote_control === undefined ? "–"
+      : a.remote_control ? "on — also reachable from the Claude app" : "off"],
     ["Tasks", tasks.length ? `${done}/${tasks.length} done` : "–"],
     // The one row here that is a measurement rather than a fact, so its numbers
     // are coloured like every other token count on the page.
