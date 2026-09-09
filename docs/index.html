@@ -303,11 +303,18 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       dropped. <strong>Never let a gap in evidence render as a confident claim</strong> — the
       card says how long it has been quiet and lets you judge, because "it wrote nothing" and
       "it ended" are not the same fact.</li>
-  <li><strong>A remote pid is a number from another machine.</strong> Skipping an entry because
-      <code>/proc/&lt;pid&gt;</code> exists locally hands that number to whatever unrelated
-      process happens to hold it and drops a real session — 0.06% of the time where
-      <code>pid_max</code> is 4M, but 7.7% on a box with the common 32768. The check is only
-      meaningful if a local <em>claude</em> holds it.</li>
+  <li><strong>A pid does not say which machine a session is on.</strong> Every entry reaching
+      <code>discover_remote_regs</code> already has a pid that is dead <em>here</em> — the live
+      ones were claimed earlier — so "the pid is gone" was being read as "it runs elsewhere",
+      and every local agent that crashed or was killed got filed under <em>on another
+      machine</em> for hours. The registry answers it directly: <code>pidDomain</code> carries
+      the machine-id of the host the process runs on, so compare that with
+      <code>/etc/machine-id</code>. Same id and no process means the session ended here and the
+      cemetery has it; a different id means it is genuinely off-host. Entries without a
+      <code>pidDomain</code> (older Claude Code) fall back to the pid, and then only a local
+      <em>claude</em> holding it counts — a bare <code>/proc</code> check hands the number to
+      whatever unrelated process owns it. The machine-id is used for the comparison only; like
+      the messaging socket path it never appears in a response.</li>
   <li><strong>Compaction shows no elapsed timer for its first ~15 seconds</strong> — just
       <code>✶ Compacting conversation…</code>. Keying the spinner off the timer therefore
       reported nothing for most of a compaction pass. The animated glyph at the line start is

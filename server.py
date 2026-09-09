@@ -1517,6 +1517,39 @@ REMOTE_FRESH_SECONDS = 300
 REMOTE_KEEP_SECONDS = 6 * 3600
 
 
+_machine_id = []
+
+
+def local_machine_id():
+    """This host's machine-id, or None if it can't be read.
+
+    Claude Code stamps every registry entry with a `pidDomain` naming the
+    machine the process runs on. That is the only *direct* evidence of where a
+    session lives — a pid on its own is just a number, and it means nothing
+    across hosts."""
+    if not _machine_id:
+        mid = None
+        for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            try:
+                with open(p) as f:
+                    mid = f.read().strip() or None
+            except OSError:
+                continue
+            if mid:
+                break
+        _machine_id.append(mid)
+    return _machine_id[0]
+
+
+def runs_on_this_host(reg):
+    """True/False from the registry's own `pidDomain`, None when it can't say."""
+    dom = reg.get("pidDomain") or ""
+    here = local_machine_id()
+    if not dom or not here:
+        return None  # older Claude Code, or no machine-id: nothing to compare
+    return here in dom
+
+
 def discover_remote_regs(seen_sids):
     """Sessions whose process isn't on this machine at all.
 
@@ -1536,12 +1569,20 @@ def discover_remote_regs(seen_sids):
         sid = (reg or {}).get("sessionId")
         if not reg or not sid or sid in seen_sids:
             continue
-        # The pid belongs to another machine, so it is only evidence about this
-        # one if a *claude* is holding it — a bare /proc check hands the number
-        # to whatever local process happens to own it and drops the session.
+        # Everything reaching here has a pid that is dead *on this host* — the
+        # live ones were all claimed earlier. So "the pid is gone" says nothing
+        # about where the session lives, and treating it as remote filed every
+        # crashed local agent under "on another machine" for hours. Ask the
+        # registry instead: it records the machine the process runs on.
+        here = runs_on_this_host(reg)
+        if here:
+            continue  # ours, and its process is gone: it ended. History has it.
         pid = reg.get("pid", -1)
-        if pid_alive(pid) and proc_comm(pid) == "claude":
-            continue  # local: the normal path already judged it
+        if here is None and pid_alive(pid) and proc_comm(pid) == "claude":
+            # No pidDomain to go on (older Claude Code). Fall back to the pid,
+            # but only a local *claude* holding it counts — a bare /proc check
+            # hands the number to whatever unrelated process owns it.
+            continue
         try:
             age = time.time() - os.path.getmtime(
                 transcript_path(reg.get("cwd", ""), sid))
