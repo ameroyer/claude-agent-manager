@@ -1027,15 +1027,28 @@ def load_chat_file(path):
                              "ts": rec.get("timestamp"), "thinking": None})
     # A long tool-calling stretch can fill the whole window with traffic that is
     # nobody's message, leaving replies on screen with nothing to attach them
-    # to: every turn you actually typed sits further back than the window does.
+    # to: every turn you actually typed sits further back than what is shown.
+    # Checked *after* the cap, because the cap is the other way a human turn
+    # falls off — it is parsed, then sliced away with everything before it.
+    parsed = messages
+    messages = parsed[-CHAT_MAX_MESSAGES:]
     if not any(m["role"] == "user" for m in messages):
-        earlier, skipped = human_turns_before(path, max(0, size - CHAT_TAIL_BYTES),
-                                              CHAT_BACKFILL_TURNS)
-        if earlier:
+        dropped = parsed[:len(parsed) - len(messages)]
+        # A turn already read from this window beats an older one from disk.
+        at = [i for i, m in enumerate(dropped) if m["role"] == "user"]
+        if at:
+            take = at[-CHAT_BACKFILL_TURNS:]
+            earlier = [dropped[i] for i in take]
+            skipped = len(dropped) - take[0] - len(take)
+        else:
+            earlier, skipped = human_turns_before(
+                path, max(0, size - CHAT_TAIL_BYTES), CHAT_BACKFILL_TURNS)
             for m in earlier:
                 m["text"] = cap(m["text"], CHAT_MAX_CHARS)
-            messages = earlier + [{"role": "gap", "count": skipped}] + messages
-    messages = messages[-CHAT_MAX_MESSAGES:]
+        if earlier:
+            room = max(1, CHAT_MAX_MESSAGES - len(earlier) - 1)
+            messages = (earlier + [{"role": "gap", "count": skipped}]
+                        + messages[-room:])
     _chat_cache[session_id] = (mtime, messages)
     return messages
 
