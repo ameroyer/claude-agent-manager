@@ -183,6 +183,25 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       denominator.</li>
   <li><strong>Transcript mtime is not activity.</strong> Claude Code rewrites untimestamped
       bookkeeping records; sort on the newest <em>timestamped</em> record instead.</li>
+  <li><strong>The same stretch empties the conversation of your own turns.</strong> The chat
+      window is the last 2&nbsp;MB, and on a long tool run every record in it is a
+      <code>tool_use</code> or a <code>tool_result</code> — so the Exchange showed replies with
+      nothing to attach them to and your messages appeared to have been lost. They were simply
+      further back than the window. A bounded walk backwards recovers the last couple of human
+      turns and reports the gap it bridged, decoding only lines that could be a user record so
+      the bulk of a multi-megabyte file is stepped over as bytes (21&nbsp;ms on a 5.8&nbsp;MB
+      transcript, then mtime-cached). <strong>"Type is user" is not the same question as "a
+      person typed this"</strong>: tool output, an injected skill preamble, an
+      <code>[Image: …]</code> note and <code>/compact</code> all arrive as user records. The
+      rescue keys on <code>origin.kind == "human"</code>, which is the only field that actually
+      separates them; without it, it surfaces the machine talking to itself.</li>
+  <li><strong>Waiting for pasted text to reappear is waiting on a guess.</strong> A send pasted
+      the message, then polled until the first 20 characters showed up in the input line. Claude
+      Code lays a paste out differently by size and by whether the agent is mid-turn, so every
+      time that guess missed, the send sat out its full 1.5&nbsp;s timeout and then reported
+      success anyway — measured at 1,526&nbsp;ms. Watch whether the input line <em>changed</em>
+      instead: it answers the real question (did the paste land; did Enter clear it) without
+      caring how it was drawn.</li>
   <li><strong>A long tool-calling stretch contains no message text at all.</strong> Think, call
       a tool, read the result, repeat — the assistant records hold only
       <code>thinking</code> and <code>tool_use</code> blocks, and the user records only

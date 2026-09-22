@@ -1833,13 +1833,45 @@ function msgTime(ts) {
   return isNaN(d) ? "" : d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
 }
 
+/* The brief a sub-agent was handed.
+
+   Its opening turn is not a message in a conversation — nobody typed it to it,
+   the parent wrote it — and it reads as a wall of setup because it is one:
+   worktree, branch, house rules, and only somewhere after all that, the actual
+   goal. So it is drawn as the frame around the exchange rather than a bubble
+   inside it: centred, tinted, headed by what it is, with the housekeeping
+   folded away so the goal is the first thing you read. */
+function directiveHtml(a, text) {
+  const cut = (text || "").search(/^#{1,3}\s+\S/m);
+  const setup = cut > 0 ? text.slice(0, cut).trim() : "";
+  const goal = cut > 0 ? text.slice(cut).trim() : (text || "");
+  return `<div class="msg directive">
+    <div class="directive-head">
+      <span class="sub-fork">⑂</span>
+      <span class="directive-who">${esc(a.display_name || a.name)}</span>
+      <span class="directive-what">— the task it was given</span>
+    </div>
+    ${setup ? `<details class="directive-setup">
+      <summary>Setup it was told first — worktree, branch, house rules</summary>
+      <div class="think-body">${mdHtml(setup)}</div></details>` : ""}
+    <div class="msg-text">${mdHtml(goal)}</div>
+  </div>`;
+}
+
 function renderChatEntries(a, msgs) {
   const name = a.display_name || a.name;
+  let briefed = false;
   return msgs.map(m => {
     if (m.role === "gap") {
       return `<div class="chat-gap">… ${m.count} earlier step${m.count === 1 ? "" : "s"} — open Exchange for the full turn</div>`;
     }
     if (m.role === "tool") return toolLine(m);
+    // Only the first one: a sub-agent can be written to again mid-run, and
+    // those really are messages to it.
+    if (a.subagent && m.role === "user" && !briefed) {
+      briefed = true;
+      return directiveHtml(a, m.text);
+    }
     return chatBubble(m.role, m.text, m.role === "user" ? "You" : name,
                       m.ts, m.thinking, m.pending, a);
   }).join("");

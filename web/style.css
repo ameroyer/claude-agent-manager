@@ -751,6 +751,31 @@ main {
 .msg.user { align-self: flex-end; flex-direction: row-reverse; }
 .msg.assistant, .msg.approval { align-self: flex-start; }
 .msg-col { min-width: 0; flex: 1; }
+
+/* The brief a sub-agent was handed: centred, and set apart from the turns
+   around it. Not a bubble — nobody said this to anyone, the parent wrote it
+   before the conversation started, so it reads as the frame rather than a
+   turn inside it. Self-aligned centre because .chat is a flex column where
+   user turns hug the right and assistant turns the left. */
+.msg.directive {
+  align-self: center; display: block; width: 100%; max-width: 44em;
+  margin: 2px 0 12px; padding: 12px 15px;
+  background: var(--surface-3);
+  border: 1px solid var(--border); border-radius: 12px;
+}
+.directive-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 9px;
+  font: 700 10px var(--mono); text-transform: uppercase; letter-spacing: .09em;
+  color: var(--muted);
+}
+.directive-who { color: var(--ink-2); }
+/* The housekeeping it was told before the goal — present, but not first. */
+.directive-setup { margin-bottom: 10px; }
+.directive-setup > summary {
+  cursor: pointer; font: 11px var(--mono); color: var(--muted);
+  padding: 2px 0; user-select: none;
+}
+.directive-setup > summary:hover { color: var(--ink-2); }
 .avatar, .avatar-pet {
   flex-shrink: 0; width: 26px; height: 26px; display: block; margin-bottom: 2px;
 }

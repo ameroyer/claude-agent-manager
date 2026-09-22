@@ -867,6 +867,93 @@ def load_agent_status(session_id):
 _chat_cache = {}
 
 
+# How far back to look for a human turn when the window holds none, and how many
+# to recover. Bounded: this reads past the window, so it must stay a rescue
+# rather than a second pass over the file.
+CHAT_BACKFILL_BYTES = 8 * 1024 * 1024
+CHAT_BACKFILL_TURNS = 2
+
+
+def human_turn_text(rec):
+    """The text of a human turn, or None if this user record is not one.
+
+    Claude Code writes tool output as a `user` record too, and wraps injected
+    context in a tag, so "type is user" is not the same question as "a person
+    typed this". Content is usually a plain string but some human turns arrive
+    as a [{"type":"text"}] list; treating those as machine traffic silently
+    dropped them from the conversation."""
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result"
+               for b in content):
+            return None  # tool output, not a human turn
+        text = "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text").strip()
+    elif isinstance(content, str):
+        text = content.strip()
+    else:
+        return None
+    if not text or text.startswith("<"):
+        return None
+    return text
+
+
+def human_turns_before(path, end, want):
+    """The last `want` human turns lying before byte `end` → (turns, skipped).
+
+    Walks backwards from the window rather than parsing the file again: only
+    lines that could be a user record are decoded at all, so the bulk of a
+    multi-megabyte transcript is stepped over as bytes. `skipped` is how many
+    records were passed on the way, which the page shows as the size of the gap
+    it is bridging."""
+    if end <= 0 or want <= 0:
+        return [], 0
+    start = max(0, end - CHAT_BACKFILL_BYTES)
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            chunk = f.read(end - start)
+    except OSError:
+        return [], 0
+    lines = chunk.decode("utf-8", "replace").splitlines()
+    if start:
+        lines = lines[1:]  # the seek landed mid-record
+    # Claude Code marks a turn a person actually typed with origin.kind=human.
+    # Without that test the rescue surfaces the machine's own user-shaped
+    # records — an injected skill preamble, an "[Image: …]" note, a /compact —
+    # which is not what you were looking for when your message went missing.
+    # Older transcripts predate the marker, so an unmarked turn is kept as a
+    # fallback and only used when nothing better was found.
+    typed, fallback, seen = [], [], 0
+    for line in reversed(lines):
+        seen += 1
+        if '"user"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        text = human_turn_text(rec) if rec.get("type") == "user" else None
+        if text is None:
+            continue
+        turn = {"role": "user", "text": text, "ts": rec.get("timestamp"),
+                "thinking": None, "_skipped": seen - 1}
+        if (rec.get("origin") or {}).get("kind") == "human":
+            typed.append(turn)
+            if len(typed) >= want:
+                break
+        elif len(fallback) < want:
+            fallback.append(turn)
+    out = typed or fallback
+    if not out:
+        return [], 0
+    skipped = out[0]["_skipped"]
+    for turn in out:
+        turn.pop("_skipped", None)
+    out.reverse()
+    return out, skipped
+
+
 def load_chat(cwd, session_id):
     """Last N user/assistant messages from the transcript tail (mtime-cached)."""
     return load_chat_file(transcript_path(cwd, session_id))
@@ -932,24 +1019,22 @@ def load_chat_file(path):
                 messages.append({"role": "tool", "name": tu["name"],
                                  "detail": tu["detail"], "ts": rec.get("timestamp")})
         else:  # user
-            # Content is usually a plain string, but Claude Code also writes
-            # some human turns as a [{"type":"text"}] list. Treating those as
-            # "not a human turn" silently dropped them from the chat.
-            if isinstance(content, list):
-                if any(isinstance(b, dict) and b.get("type") == "tool_result"
-                       for b in content):
-                    continue  # tool output, not a human turn
-                text = "\n".join(b.get("text", "") for b in content
-                                 if isinstance(b, dict) and b.get("type") == "text").strip()
-            elif isinstance(content, str):
-                text = content.strip()
-            else:
-                continue
-            if not text or text.startswith("<"):
+            text = human_turn_text(rec)
+            if text is None:
                 continue
             pending_think = []  # new human turn; drop any orphan thinking
             messages.append({"role": "user", "text": cap(text, CHAT_MAX_CHARS),
                              "ts": rec.get("timestamp"), "thinking": None})
+    # A long tool-calling stretch can fill the whole window with traffic that is
+    # nobody's message, leaving replies on screen with nothing to attach them
+    # to: every turn you actually typed sits further back than the window does.
+    if not any(m["role"] == "user" for m in messages):
+        earlier, skipped = human_turns_before(path, max(0, size - CHAT_TAIL_BYTES),
+                                              CHAT_BACKFILL_TURNS)
+        if earlier:
+            for m in earlier:
+                m["text"] = cap(m["text"], CHAT_MAX_CHARS)
+            messages = earlier + [{"role": "gap", "count": skipped}] + messages
     messages = messages[-CHAT_MAX_MESSAGES:]
     _chat_cache[session_id] = (mtime, messages)
     return messages
@@ -2120,6 +2205,26 @@ def composer_holds(target, probe):
     return False
 
 
+def composer_line(target):
+    """The pane's input line — the bottom-most one starting with ❯ — or None.
+
+    What it *contains* is deliberately not read. Matching the pasted text back
+    was a guess about rendering: Claude Code lays a paste out differently by
+    size and by whether the agent is mid-turn, and every time the guess missed,
+    the send sat out its whole timeout and then reported success anyway. A send
+    that took 1.5 s did so because this comparison never matched, not because
+    anything was slow. Whether the line *changed* answers the real question —
+    did the paste land, and later, did Enter clear it — without caring how it
+    chose to draw itself."""
+    lines = [ln for ln in
+             run(["tmux", "capture-pane", "-p", "-t", target, "-S", "-4"]).splitlines()
+             if ln.strip()]
+    for line in reversed(lines):
+        if line.lstrip().startswith("\u276f"):
+            return line.strip()
+    return None
+
+
 def wait_until(predicate, timeout, step=0.03):
     """Poll `predicate` until it holds. Returns whether it did."""
     end = time.time() + timeout
@@ -2143,16 +2248,18 @@ def send_text(target, text):
     if not valid_pane(target):
         return False, "unknown pane"
     enter = ["tmux", "send-keys", "-t", target, "Enter"]
-    probe = text.strip().splitlines()[0][:20]
+    before = composer_line(target)
     try:
         subprocess.run(["tmux", "load-buffer", "-b", "claude-agent-manager", "-"],
                        input=text.encode(), timeout=5, check=True)
         subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", "claude-agent-manager",
                         "-t", target], timeout=5, check=True)
         # let the paste land before submitting, or the Enter gets swallowed
-        wait_until(lambda: composer_holds(target, probe), 1.5)
+        wait_until(lambda: composer_line(target) != before, 1.5)
+        pasted = composer_line(target)
         subprocess.run(enter, timeout=5, check=True)
-        if not wait_until(lambda: not composer_holds(target, probe), 1.0):
+        # submitted once the input line stops holding what we just put in it
+        if not wait_until(lambda: composer_line(target) != pasted, 1.0):
             subprocess.run(enter, timeout=5, check=True)
             _cache["t"] = 0.0
             return True, "sent (needed a second Enter)"
