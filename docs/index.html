@@ -248,6 +248,19 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       definition can name its own, so inheriting the parent's put the wrong hat on every
       cheap helper. It is read from the sub-agent's own transcript instead, and a fork that
       has not answered yet stays an egg rather than borrowing one.</li>
+  <li><strong>The pane's agent roster outlives the turn that drew it.</strong> Claude Code
+      leaves <code>◯ general-purpose  …</code> on screen after a turn ends, so a pane that
+      finished hours ago still lists the last sub-agent it ran. Reading that as live pinned the
+      parent to <em>working</em> for as long as nothing else redrew the pane — three agents were
+      stuck that way on one board, and a pet that never goes idle is worse than one briefly
+      wrong, because the board is read at a glance. The roster says <em>what</em> is running; it
+      does not say <em>whether</em>. A running sub-agent writes to its own transcript
+      continuously, so that is what is asked for corroboration
+      (<code>subagent_writing</code>: mtimes only, no parsing, 1.2&nbsp;ms for 17 agents). The
+      cost is a few seconds' lag on a freshly launched one, which corrects itself the moment it
+      writes. <strong>Evidence that something started is not evidence that it is still going.</strong>
+      The same fact drives the list, so a suppressed roster entry stops reading "starting…"
+      beside a pet that reads idle.</li>
   <li><strong>A Task sub-agent's <code>tool_use</code> is only written once it finishes.</strong>
       Live ones come from the pane's agent roster (<code>●&nbsp;main</code> /
       <code>◯&nbsp;type</code>).</li>

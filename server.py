@@ -1263,21 +1263,54 @@ def derive_state(registry_status, last_event, transcript_mtime=None, working=Non
     return "busy" if registry_status == "busy" else "idle"
 
 
-def with_subagent_work(state, roster):
+def subagent_writing(cwd, session_id):
+    """True when a sub-agent of this session has written within
+    SUBAGENT_FRESH_SECONDS — i.e. something really is running inside it.
+
+    Only mtimes are read, no parsing: this is asked of every agent on every
+    build, and the question is just "did anything move recently"."""
+    if not cwd or not session_id:
+        return False
+    d = os.path.join(PROJECTS_DIR, re.sub(r"[^A-Za-z0-9]", "-", cwd),
+                     session_id, "subagents")
+    now = time.time()
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                if not e.name.endswith(".jsonl"):
+                    continue
+                try:
+                    if now - e.stat().st_mtime < SUBAGENT_FRESH_SECONDS:
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def with_subagent_work(state, roster, writing=False):
     """Fold running sub-agents into the parent's state → (state, activity).
 
     A session whose Task sub-agents are still running is not idle: the work is
     happening inside it, it just isn't the thing typing. A sub-agent launched in
     the background leaves the parent's own spinner off, so the pane on its own
-    reads "idle" while three agents churn under it.
+    reads "idle" while agents churn under it.
 
-    Only the pane roster is allowed to flip this. It is the pane's live agent
-    list, whereas a sub-agent transcript's mtime is a guess with 90 seconds of
-    slack in it — good enough to grey out a finished row, not good enough to
-    tell you a pet is working. The attention states are left alone: an agent
-    waiting on you is still waiting on you, whatever it has running."""
+    The roster says *what* is running; it does not say *whether*. Claude Code
+    leaves the agent roster drawn after a turn ends, so a pane that finished
+    hours ago still lists the last sub-agent it ran — and taking that as live
+    pinned the parent to "working" for as long as nothing else redrew the pane.
+    A pet that never goes idle is worse than one that is briefly wrong, because
+    the whole board is read at a glance. So the roster is believed only while
+    some sub-agent is actually writing (`writing`): the roster names it, the
+    transcript proves it. The cost is a few seconds' lag on a freshly launched
+    one, which corrects itself as soon as it writes anything.
+
+    The attention states are left alone: an agent waiting on you is still
+    waiting on you, whatever it has running."""
     live = len([x for x in roster if x.get("running")])
-    if not live:
+    if not live or not writing:
         return state, None
     return ("busy" if state == "idle" else state,
             f"{live} sub-agent{'' if live == 1 else 's'} working")
@@ -1900,7 +1933,13 @@ def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
     last_activity = tinfo["last_activity"] or tinfo["mtime"]
     state = derive_state(reg.get("status"), last_event, last_activity,
                          pstatus["working"], pstatus["prompt"])
-    state, sub_activity = with_subagent_work(state, pstatus["subagents"])
+    # One fact, used twice: if nothing is writing, the pane's roster is paint
+    # left over from a finished turn. The list must say so too, or a sub-agent
+    # that stopped hours ago sits there reading "starting…" forever.
+    sub_writing = subagent_writing(cwd, sid)
+    roster = pstatus["subagents"] if sub_writing else [
+        dict(x, running=False) for x in pstatus["subagents"]]
+    state, sub_activity = with_subagent_work(state, roster, sub_writing)
     notif_msg = None
     if last_event and last_event.get("event") == "notification" and state in ("needs_input", "waiting"):
         notif_msg = last_event.get("message")
@@ -1976,8 +2015,8 @@ def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
         "activity": (pstatus["activity"] or sub_activity) if state == "busy" else None,
         "progress": pstatus["progress"] if state == "busy" else None,
         "pending_tool": tinfo["pending_tool"] if state == "needs_input" else None,
-        "subagents": pstatus["subagents"] + [x for x in tinfo["subagents"]
-                                            if not x["running"]][-3:],
+        "subagents": roster + [x for x in tinfo["subagents"]
+                               if not x["running"]][-3:],
         "_spawned": tinfo["spawned"],
         "mcp": mcp_servers(cwd, sid),
         "prompt": pstatus["prompt"],
