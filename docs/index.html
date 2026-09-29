@@ -282,7 +282,11 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       spawn reported success. <code>spawn_session</code> now waits for the UI to come up or for
       that message, and tears the empty session down. Match the message <em>exactly</em>: a
       looser rule ("command not found") also matched the noise a login profile prints into
-      every new pane, and would have killed good sessions.</li>
+      every new pane, and would have killed good sessions. The first message waits on the
+      same signal: it used to be pasted 2.5&nbsp;s after launch, which is slower than a boot
+      that goes well and actively harmful when one doesn't — at a shell prompt, a paste
+      followed by Enter is a command. It now goes only once the UI has asked for input, and
+      if that never happens the message is kept and said to be unsent.</li>
   <li><strong>Resuming a conversation that is already open starts a second process on the same
       session id and transcript.</strong> Both appear on the board under one id, they interleave
       their writes, and a kill that finds an agent by id alone can hit the wrong one. Resume is

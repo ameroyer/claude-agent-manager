@@ -157,6 +157,22 @@ const MODEL_ORDER = ["fable", "opus", "sonnet", "haiku", "other"];
 const PENDING_MODEL_TIP = "Switched — this is the model it will answer with. "
   + "The session hasn't replied yet, and only a reply makes it official.";
 
+/* The model pill, drawn the same way on the card and in the card's header.
+   They had drifted — one tinted, one not, and two wordings for the same tip —
+   which is what a second copy of six lines does over time. `tint` is the only
+   real difference: the header has no pet beside it to carry the colour. */
+function modelTagHtml(a, model, tint) {
+  const pend = modelPending(a);
+  const style = tint ? ` style="color:${model.outline}"` : "";
+  const label = `${esc(model.label)}${pend ? "…" : ""}`;
+  if (!a.tmux) {
+    return `<span class="model-tag"${style} title="Model — the pet's colour">${label}</span>`;
+  }
+  return `<button class="model-tag${pend ? " pending" : ""}" data-target="${esc(a.tmux.target)}"${style}
+    title="${pend ? PENDING_MODEL_TIP : "Model (the pet's colour) — click to switch"}"
+    >${label}</button>`;
+}
+
 function modelPending(a) {
   if (!a.model_pending) return false;
   const family = modelFamily(a.model_pending);
@@ -1107,7 +1123,7 @@ const subDoneOpen = new Set();
    parent — same folder, same branch, so the same body and the same held item —
    with no model, which is exactly what makes a pet an egg. */
 function rosterPet(name, parent) {
-  return {sessionId: `${parent.sessionId} roster ${name}`,
+  return {sessionId: `${parent.sessionId}\u0000roster\u0000${name}`,
           name, state: "busy", cwd: parent.cwd, git: parent.git,
           context_breakdown: null, tmux: null, remote: false};
 }
@@ -1259,7 +1275,6 @@ function cardHtml(a) {
   const done = tasks.filter(t => t.status === "completed").length;
   const total = tasks.length;
   const model = MODEL_SKIN[modelFamily(shownModel(a))];
-  const pend = modelPending(a);
   const accent = critterOf(a).accent;
 
   const ctx = contextInfo(a);
@@ -1288,10 +1303,7 @@ function cardHtml(a) {
         ${stalePipHtml(a)}
         ${hasNew(a) ? `<span class="new-pip" title="Claude answered since you last opened this card">new</span>` : ""}
         ${drafts[a.sessionId] ? `<span class="draft-pip" title="Unsent message waiting here: ${esc(drafts[a.sessionId].slice(0, 120))}">draft</span>` : ""}
-        ${a.tmux ? `<button class="model-tag${pend ? " pending" : ""}" data-target="${esc(a.tmux.target)}"
-           title="${pend ? PENDING_MODEL_TIP : "Model (the pet's colour) — click to switch model"}"
-           >${esc(model.label)}${pend ? "…" : ""}</button>`
-         : `<span class="model-tag" title="Model — the pet's colour">${esc(model.label)}</span>`}
+        ${modelTagHtml(a, model, false)}
       </div>
       <div class="lcd-dir" title="Working directory: ${esc(a.cwd)}">${esc(a.cwd)}</div>
       <div class="tama-mid">
@@ -2117,7 +2129,6 @@ function modalHtml(a) {
 
 function modalHeadHtml(a) {
   const model = MODEL_SKIN[modelFamily(shownModel(a))];
-  const pend = modelPending(a);
   return `<span class="modal-pet">${mascotSvg(a, "modal-mascot")}</span>
     ${badge(a.state)}
     <span class="name-holder">
@@ -2129,12 +2140,7 @@ function modalHeadHtml(a) {
           "Tag this pet. Pets sharing a tag are grouped; starred ones lead, the rest sit beside them."}"
         >${a.tag ? `#${esc(a.tag)}` : "+ tag"}</button>
     </span>
-    ${a.tmux
-      ? `<button class="model-tag${pend ? " pending" : ""}" data-target="${esc(a.tmux.target)}"
-           style="color:${model.outline}"
-           title="${pend ? PENDING_MODEL_TIP : "Model (the pet's hat) — click to switch"}"
-           >${esc(model.label)}${pend ? "…" : ""}</button>`
-      : `<span class="model-tag" style="color:${model.outline}" title="Model — the pet's hat">${esc(model.label)}</span>`}
+    ${modelTagHtml(a, model, true)}
     ${modeChipHtml(a, "head-mode")}
     <span class="project" style="margin:0;flex:1" title="${esc(a.cwd)}">${esc(a.cwd)}</span>
     ${a.tmux ? `<span class="tmux-tag" title="${esc(tmuxTitle(a.tmux.target))}">${esc(a.tmux.target)}</span>` : ""}

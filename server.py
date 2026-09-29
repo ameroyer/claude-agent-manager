@@ -41,6 +41,27 @@ MARKS_FILE = os.path.join(CLAUDE_DIR, "agent-manager-marks.json")
 TAG_MAX_CHARS = 24
 MAX_MARKS = 400  # keep the file bounded; oldest entries fall off
 CLAUDE_CONFIG = os.path.join(HOME, ".claude.json")
+# The page renders whatever the agents wrote, and an agent's transcript is full
+# of text it did not write itself — a fetched page, a file it was asked to read.
+# The markdown renderer escapes before it marks up and only emits http(s) links,
+# so nothing should get through; this is the second lock. It matters more here
+# than on a normal site: the token sits in the page's URL fragment, and script
+# running in the page could spend it on /api/spawn. Everything the page needs is
+# same-origin — one script file, one stylesheet, one icon, no fonts, no CDN, no
+# outbound request of any kind — so the policy can say 'none' and then name them.
+# 'unsafe-inline' for styles is the one concession: the markup carries style
+# attributes (a progress bar's width), which no nonce can cover.
+SECURITY_HEADERS = (
+    ("Content-Security-Policy",
+     "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+     "img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+     "frame-ancestors 'none'"),
+    ("X-Content-Type-Options", "nosniff"),
+    # A link in a transcript points wherever the agent found it. Following one
+    # should not tell that site there is a dashboard here, or on which port.
+    ("Referrer-Policy", "no-referrer"),
+)
+
 # realpath, not abspath: installed into a venv (uvx/pip) any parent may be a
 # symlink, and the static-file guard below compares against a realpath'd
 # candidate — a mismatch there would 404 every asset.
@@ -915,7 +936,10 @@ def human_turns_before(path, end, want):
             chunk = f.read(end - start)
     except OSError:
         return [], 0
-    lines = chunk.decode("utf-8", "replace").splitlines()
+    # Split as bytes and decode only the handful of lines that could be a turn:
+    # decoding the whole window was most of the cost of the rescue, and all but
+    # a few hundred bytes of it is tool traffic that is thrown away immediately.
+    lines = chunk.split(b"\n")
     if start:
         lines = lines[1:]  # the seek landed mid-record
     # Claude Code marks a turn a person actually typed with origin.kind=human.
@@ -927,10 +951,10 @@ def human_turns_before(path, end, want):
     typed, fallback, seen = [], [], 0
     for line in reversed(lines):
         seen += 1
-        if '"user"' not in line:
+        if b'"user"' not in line:
             continue
         try:
-            rec = json.loads(line)
+            rec = json.loads(line.decode("utf-8", "replace"))
         except Exception:
             continue
         text = human_turn_text(rec) if rec.get("type") == "user" else None
@@ -1936,9 +1960,11 @@ def build_agent(reg, pid_to_pane, names=None, captures=None, marks=None):
     # One fact, used twice: if nothing is writing, the pane's roster is paint
     # left over from a finished turn. The list must say so too, or a sub-agent
     # that stopped hours ago sits there reading "starting…" forever.
-    sub_writing = subagent_writing(cwd, sid)
-    roster = pstatus["subagents"] if sub_writing else [
-        dict(x, running=False) for x in pstatus["subagents"]]
+    roster = pstatus["subagents"]
+    # No roster, no question to answer — don't go to disk for it.
+    sub_writing = bool(roster) and subagent_writing(cwd, sid)
+    if not sub_writing:
+        roster = [dict(x, running=False) for x in roster]
     state, sub_activity = with_subagent_work(state, roster, sub_writing)
     notif_msg = None
     if last_event and last_event.get("event") == "notification" and state in ("needs_input", "waiting"):
@@ -2310,12 +2336,6 @@ def wait_until(predicate, timeout, step=0.03):
     return False
 
 
-def note(msg, scrolled):
-    """Say so when a send had to pull the pane out of scrollback: the reply
-    landed, but her place in the history did not survive it."""
-    return msg + " · left scrollback" if scrolled else msg
-
-
 def send_text(target, text):
     """Paste a message into the agent's composer and submit it.
 
@@ -2328,7 +2348,9 @@ def send_text(target, text):
         return False, "empty message"
     if not valid_pane(target):
         return False, "unknown pane"
-    scrolled = leave_copy_mode(target)
+    # Say so when the send had to pull the pane out of scrollback: the message
+    # landed, but the reader's place in the history did not survive it.
+    tail = " · left scrollback" if leave_copy_mode(target) else ""
     enter = ["tmux", "send-keys", "-t", target, "Enter"]
     before = composer_line(target)
     try:
@@ -2344,11 +2366,11 @@ def send_text(target, text):
         if not wait_until(lambda: composer_line(target) != pasted, 1.0):
             subprocess.run(enter, timeout=5, check=True)
             _cache["t"] = 0.0
-            return True, note("sent (needed a second Enter)", scrolled)
+            return True, "sent (needed a second Enter)" + tail
     except Exception as e:
         return False, str(e)
     _cache["t"] = 0.0  # let the very next poll see the agent start working
-    return True, note("sent", scrolled)
+    return True, "sent" + tail
 
 
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._\[\]-]{1,64}$")
@@ -2622,8 +2644,32 @@ def spawn_session(cwd, prompt, name=None, resume=None):
             capture_output=True, text=True, timeout=5, check=True).stdout.strip()
         subprocess.run(["tmux", "send-keys", "-t", pane, launch, "Enter"],
                        timeout=5, check=True)
+        # tmux succeeding says nothing about Claude. If a --resume can't be
+        # honoured it prints why and exits at once, leaving a brand-new tmux
+        # session at a shell prompt and no agent on the board — which looked
+        # exactly like "I resurrected it and it never came back". Watch until
+        # the UI is up, or until it says why it gave up.
+        why = []
+
+        def settled():
+            lines = pane_lines(pane)
+            why[:] = [ln.strip() for ln in lines if _LAUNCH_FAILED_RE.search(ln)]
+            return bool(why) or footer_mode(lines) is not None
+
+        up = wait_until(settled, RESUME_CHECK_SECONDS)
+        if why:  # don't leave the empty session behind
+            subprocess.run(["tmux", "kill-session", "-t", name],
+                           capture_output=True, timeout=5)
+            return False, why[0][:120]
         if prompt and prompt.strip():
-            time.sleep(2.5)  # let claude boot before sending the first message
+            # Waiting for the UI rather than sleeping at it: the old fixed 2.5 s
+            # was both slower than a boot that went well and no help when one
+            # went badly — the first message was then pasted at a shell prompt
+            # and Enter ran it as a command.
+            if not up:
+                _cache["t"] = 0.0
+                return True, f"{name} — started, but it never asked for input, " \
+                             "so your first message is still unsent"
             subprocess.run(["tmux", "load-buffer", "-b", "claude-agent-manager", "-"],
                            input=prompt.encode(), timeout=5, check=True)
             subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", "claude-agent-manager",
@@ -2633,22 +2679,6 @@ def spawn_session(cwd, prompt, name=None, resume=None):
                            timeout=5, check=True)
     except Exception as e:
         return False, str(e)
-    # tmux succeeding says nothing about Claude. If a --resume can't be honoured
-    # it prints why and exits at once, leaving a brand-new tmux session sitting
-    # at a shell prompt and no agent on the board — which looked exactly like
-    # "I resurrected it and it never came back". Watch until its UI is up, or
-    # until it says why it gave up, and don't leave the empty session behind.
-    if resume:
-        why = []
-        def settled():
-            lines = pane_lines(pane)
-            why[:] = [ln.strip() for ln in lines if _LAUNCH_FAILED_RE.search(ln)]
-            return bool(why) or footer_mode(lines) is not None
-        wait_until(settled, RESUME_CHECK_SECONDS)
-        if why:
-            subprocess.run(["tmux", "kill-session", "-t", name],
-                           capture_output=True, timeout=5)
-            return False, why[0][:120]
     _cache["t"] = 0.0
     # A resumed session keeps its id, so its headstone has to be withdrawn now
     # rather than at the end of the history TTL.
@@ -2666,6 +2696,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in SECURITY_HEADERS:
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 

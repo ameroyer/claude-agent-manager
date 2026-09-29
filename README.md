@@ -178,6 +178,13 @@ the server like a key to your machine:
   can't read your transcripts or drive your agents.
 - Keep it bound to `127.0.0.1` (the default) and reach a remote box over the SSH
   tunnel above rather than binding to `0.0.0.0`.
+- The page renders text the agents didn't write — a page one of them fetched, a
+  file it was asked to read. The markdown renderer escapes before it marks up and
+  emits only `http(s)` links, and a content-security policy backs that up: the
+  page may load its own script, stylesheet and icon and talk to its own origin,
+  nothing else. It matters because the token lives in the page's URL fragment.
+- Nothing here calls out to the network, and no asset is loaded from one. The
+  board works with the machine offline.
 
 ## License
 
