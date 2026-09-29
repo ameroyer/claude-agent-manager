@@ -2303,10 +2303,13 @@ function toast(msg, isErr) {
   toastTimer = setTimeout(() => el.remove(), 7000);
 }
 
-function flashStatus(ok) {
+/* The server's own word for what happened, not just whether it worked: a send
+   that had to pull the pane out of scrollback, or that needed a second Enter,
+   says so here rather than looking identical to a clean one. */
+function flashStatus(ok, msg) {
   const el = modal.querySelector(".composer-status");
   if (!el) return;
-  el.textContent = ok ? "✓ sent" : "✕ failed";
+  el.textContent = ok ? "✓ " + (msg || "sent") : "✕ failed";
   el.className = "composer-status " + (ok ? "ok" : "err");
   setTimeout(() => { el.textContent = ""; }, 2000);
 }
@@ -2344,7 +2347,7 @@ async function sendMessage() {
   pending = {sid: a.sessionId, text, ts: Date.now()};
   renderModal();
   const r = await post("/api/send", {target: a.tmux.target, text});
-  flashStatus(r.ok);
+  flashStatus(r.ok, r.msg);
   if (!r.ok) {  // nothing was delivered — hand the text back rather than lose it
     pending = null;
     setDraft(a.sessionId, text);

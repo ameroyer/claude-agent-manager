@@ -261,6 +261,18 @@ collisions probe forward, because 8 keys in 8 slots collide 99.8% of the time.</
       writes. <strong>Evidence that something started is not evidence that it is still going.</strong>
       The same fact drives the list, so a suppressed roster entry stops reading "starting…"
       beside a pet that reads idle.</li>
+  <li><strong>tmux copy mode eats keystrokes, but not pastes.</strong> Scrolling a pane's
+      history — <code>⌃b [</code>, or just the mouse wheel — puts it in copy mode, where
+      <code>send-keys</code> is read by the scrollback cursor instead of reaching the program.
+      <code>paste-buffer</code> is not, and that split is what made this look like a dashboard
+      bug: the message itself arrived in the composer and then sat there, because the Enter
+      behind it went to copy mode. The bubble stayed on <em>sending…</em> until it gave up a
+      minute later. Every keystroke the server sends has the same problem — an approval reply,
+      Escape to interrupt, a model switch — so each of them now leaves copy mode first
+      (<code>leave_copy_mode</code>, 2.8&nbsp;ms, and only on something you clicked). The price
+      is the pane's scroll position, and there is no way to deliver a keystroke without paying
+      it, so the send says when it did: <em>sent · left scrollback</em>.
+      <strong>A pane that looks idle may only be listening differently.</strong></li>
   <li><strong>A Task sub-agent's <code>tool_use</code> is only written once it finishes.</strong>
       Live ones come from the pane's agent roster (<code>●&nbsp;main</code> /
       <code>◯&nbsp;type</code>).</li>

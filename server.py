@@ -2237,6 +2237,29 @@ def valid_pane(target):
     return target in out.split()
 
 
+def leave_copy_mode(target):
+    """Drop a pane out of tmux copy mode, and report whether it had to.
+
+    Scrolling a pane's history — ⌃b [ , or just the mouse wheel — puts it in
+    copy mode, and copy mode eats keys: send-keys is read by the scrollback
+    cursor instead of reaching the program. paste-buffer is not, which is what
+    made this look like a dashboard bug rather than a tmux mode: the message
+    itself arrived in the composer and then sat there unsent, because the Enter
+    behind it went to copy mode. The bubble stayed on "sending…" until it gave
+    up a minute later.
+
+    Every keystroke this server sends has the same problem — a reply to an
+    approval prompt, Escape to interrupt, a model switch — so leaving copy mode
+    is the first thing each of them does. The price is the pane's scroll
+    position, and there is no way to deliver a keystroke without paying it."""
+    if run(["tmux", "display-message", "-p", "-t", target,
+            "#{pane_in_mode}"]).strip() != "1":
+        return False
+    subprocess.run(["tmux", "send-keys", "-X", "-t", target, "cancel"],
+                   timeout=5, check=False)
+    return True
+
+
 def composer_holds(target, probe):
     """True while `probe` is still sitting in the pane's input box.
 
@@ -2287,6 +2310,12 @@ def wait_until(predicate, timeout, step=0.03):
     return False
 
 
+def note(msg, scrolled):
+    """Say so when a send had to pull the pane out of scrollback: the reply
+    landed, but her place in the history did not survive it."""
+    return msg + " · left scrollback" if scrolled else msg
+
+
 def send_text(target, text):
     """Paste a message into the agent's composer and submit it.
 
@@ -2299,6 +2328,7 @@ def send_text(target, text):
         return False, "empty message"
     if not valid_pane(target):
         return False, "unknown pane"
+    scrolled = leave_copy_mode(target)
     enter = ["tmux", "send-keys", "-t", target, "Enter"]
     before = composer_line(target)
     try:
@@ -2314,11 +2344,11 @@ def send_text(target, text):
         if not wait_until(lambda: composer_line(target) != pasted, 1.0):
             subprocess.run(enter, timeout=5, check=True)
             _cache["t"] = 0.0
-            return True, "sent (needed a second Enter)"
+            return True, note("sent (needed a second Enter)", scrolled)
     except Exception as e:
         return False, str(e)
     _cache["t"] = 0.0  # let the very next poll see the agent start working
-    return True, "sent"
+    return True, note("sent", scrolled)
 
 
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._\[\]-]{1,64}$")
@@ -2342,6 +2372,7 @@ def set_model(target, model):
         return False, "bad model id"
     if not valid_pane(target):
         return False, "unknown pane"
+    leave_copy_mode(target)
     cmd = f"/model {model}"
     try:
         subprocess.run(["tmux", "send-keys", "-t", target, "C-u"],
@@ -2383,6 +2414,7 @@ def set_mode(target, mode):
         return False, "unknown mode"
     if not valid_pane(target):
         return False, "unknown pane"
+    leave_copy_mode(target)
     st = pane_status(target)
     if st["prompt"]:
         return False, "answer the approval prompt first"
@@ -2446,6 +2478,7 @@ def send_key(target, key):
         return False, "key not allowed"
     if not valid_pane(target):
         return False, "unknown pane"
+    leave_copy_mode(target)
     before = detect_prompt(pane_lines(target)) if key.isdigit() else None
     try:
         subprocess.run(["tmux", "send-keys", "-t", target, key],
