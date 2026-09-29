@@ -3,6 +3,14 @@
 A little web dashboard for keeping an eye on several Claude Code agents at once —
 styled as a shelf of Tamagotchi-like handhelds, one pixel-Claude pet per session.
 
+## Quickstart
+
+```bash
+uvx --from git+https://github.com/ameroyer/claude-agent-manager tamaclaudchi --port [PORT]
+```
+
+## TamaClaudchi
+
 Each pet's look encodes where it lives, so you can read the fleet at a glance:
 
 | what you see | what it means |
@@ -45,7 +53,7 @@ anything special for it to work.
 No clone, no install — `uvx` fetches and runs it:
 
 ```bash
-uvx --from git+https://github.com/YOUR-USERNAME/claude-agent-manager tamaclaudchi
+uvx --from git+https://github.com/ameroyer/claude-agent-manager tamaclaudchi
 ```
 
 Or from a clone, with nothing installed at all:
